@@ -3,3 +3,11 @@
 !.vscode/extensions.json
 include/secrets.h
 __pycache__/
+docs/*.aux
+docs/*.log
+docs/*.toc
+docs/*.out
+docs/*.fls
+docs/*.fdb_latexmk
+docs/*.synctex.gz
+Claude outputs/

@@ -1,6 +1,4 @@
-# Servidor en el computador que recibe la alerta del ESP32-S3.
-# Uso: python servidor_pc.py   (solo librería estándar, Python 3)
-# El PC y el ESP32 deben estar en la misma red WiFi.
+
 
 import json
 import socket
@@ -23,11 +21,15 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             pass
         hora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print("\a")  # pitido de consola
-        print("=" * 50)
-        print(f"  ¡ALERTA RECIBIDA!  {hora}")
-        print(f"  Desde: {self.client_address[0]}  Datos: {datos}")
-        print("=" * 50)
+        evento = datos.get("evento") if isinstance(datos, dict) else None
+        if evento == "CONECTADA":
+            print(f"[{hora}] ESP32 conectada al WiFi desde {self.client_address[0]}")
+        else:
+            print("\a")  # pitido de consola
+            print("=" * 50)
+            print(f"  ¡ALERTA RECIBIDA!  {hora}")
+            print(f"  Desde: {self.client_address[0]}  Datos: {datos}")
+            print("=" * 50)
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")

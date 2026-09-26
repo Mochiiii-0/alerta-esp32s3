@@ -1,0 +1,1202 @@
+\documentclass[11pt,a4paper]{article}
+
+% ---------------- Paquetes ----------------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish,es-noquoting]{babel}
+\usepackage{lmodern}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,automata,shapes.geometric,calc}
+\usepackage[most]{tcolorbox}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+
+% ---------------- Colores ----------------
+\definecolor{fondo}{RGB}{247,247,250}
+\definecolor{clave}{RGB}{0,82,155}
+\definecolor{coment}{RGB}{100,120,100}
+\definecolor{cadena}{RGB}{163,21,21}
+\definecolor{acento}{RGB}{0,110,130}
+
+% ---------------- Listings ----------------
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{fondo},
+  keywordstyle=\color{clave}\bfseries,
+  commentstyle=\color{coment}\itshape,
+  stringstyle=\color{cadena},
+  numbers=left, numberstyle=\tiny\color{gray}, numbersep=8pt,
+  frame=single, rulecolor=\color{gray!40},
+  breaklines=true, showstringspaces=false, tabsize=2,
+  xleftmargin=1.5em, framexleftmargin=1.2em,
+  literate={á}{{\'a}}1 {é}{{\'e}}1 {í}{{\'i}}1 {ó}{{\'o}}1 {ú}{{\'u}}1
+           {Á}{{\'A}}1 {É}{{\'E}}1 {Í}{{\'I}}1 {Ó}{{\'O}}1 {Ú}{{\'U}}1
+           {ñ}{{\~n}}1 {¡}{{!`}}1 {¿}{{?`}}1 {Ω}{{$\Omega$}}1
+}
+\lstdefinelanguage{ini}{
+  morecomment=[l]{;}, morestring=[b]",
+  morekeywords={platform,board,framework,monitor_speed,build_flags,monitor_rts,monitor_dtr}
+}
+
+% ---------------- Cajas ----------------
+\newtcolorbox{idea}[1][]{colback=acento!6,colframe=acento,fonttitle=\bfseries,title=#1,arc=2pt,boxrule=0.6pt,before upper={\setlength{\parskip}{5pt}}}
+
+% ---------------- Encabezado ----------------
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small Alerta ESP32-S3}
+\rhead{\small Explicación del código}
+\cfoot{\thepage}
+
+\title{\textbf{Alerta ESP32-S3}\\[4pt]\large Explicación paso a paso del código}
+\author{Sara}
+\date{\today}
+
+\begin{document}
+\shorthandoff{"}
+\maketitle
+\tableofcontents
+\newpage
+
+%==========================================================
+\section{¿Qué hace el sistema?}
+%==========================================================
+
+El sistema es un botón de alerta portátil. La condición que debe cumplir es:
+
+\begin{enumerate}[leftmargin=*]
+  \item Al oprimir el botón por primera vez, el sistema pasa de un estado
+        \textbf{estable} a un estado de \textbf{alerta} y el LED se enciende,
+        indicándole al portador que el botón fue oprimido.
+  \item Si fue un accidente, el portador tiene \textbf{30 segundos} para volver a
+        oprimir el mismo botón. En ese caso el sistema regresa a \textbf{estable}
+        y el LED se apaga.
+  \item Si pasan los 30 segundos sin cancelar, se genera una
+        \textbf{notificación al computador por WiFi} y el LED queda encendido.
+\end{enumerate}
+
+Además, cada vez que la placa arranca (o se le da \textit{reset}) avisa al
+computador que quedó conectada al WiFi, para poder comprobar el enlace.
+
+\subsection{Arquitectura}
+
+\begin{center}
+\begin{tikzpicture}[
+  bloque/.style={draw,rounded corners,fill=acento!8,minimum width=3cm,minimum height=1.3cm,align=center},
+  flecha/.style={-{Stealth[length=3mm]},thick}]
+  \node[bloque] (btn) {Botón\\(GPIO4)};
+  \node[bloque,below=0.6cm of btn] (led) {LED\\(GPIO2)};
+  \node[bloque,right=3.2cm of $(btn)!0.5!(led)$,minimum height=2.8cm] (esp) {\textbf{ESP32-S3}\\[2pt]\small\texttt{main.cpp}};
+  \node[bloque,right=2.4cm of esp] (pc) {\textbf{Computador}\\[2pt]\small\texttt{servidor\_pc.py}};
+  \draw[flecha] (btn.east) -- (btn.east -| esp.west);
+  \draw[flecha] (esp.west |- led.east) -- (led.east);
+  \draw[flecha,dashed] (esp) -- node[above]{\small WiFi} node[below]{\small HTTP POST} (pc);
+\end{tikzpicture}
+\end{center}
+
+Son dos programas que corren en lugares distintos:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Firmware} (\texttt{src/main.cpp}): corre \emph{dentro} de la ESP32-S3.
+        Lee el botón, controla el LED, lleva el tiempo y envía los mensajes por WiFi.
+  \item \textbf{Servidor} (\texttt{pc/servidor\_pc.py}): corre en el computador.
+        Espera los mensajes de la ESP32 y los muestra en la terminal.
+\end{itemize}
+
+%==========================================================
+\section{Hardware y conexiones}
+%==========================================================
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Componente} & \textbf{Pata} & \textbf{Va a} & \textbf{Nota}\\
+\midrule
+Pulsador & pata 1 & GPIO4 & \textit{pull-up} interno\\
+         & pata 2 & GND   & \\
+Resistencia 220\,$\Omega$ & un extremo & GPIO2 & limita la corriente del LED\\
+         & otro extremo & ánodo LED (pata larga) & \\
+LED      & cátodo (pata corta) & GND & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tikzpicture}[thick,scale=1]
+  % Placa
+  \draw[fill=gray!10,rounded corners] (0,0) rectangle (3,4);
+  \node at (1.5,3.6) {\textbf{ESP32-S3}};
+  \node[anchor=east] at (3,2.8) {\small GPIO4};
+  \node[anchor=east] at (3,1.8) {\small GPIO2};
+  \node[anchor=east] at (3,0.6) {\small GND};
+  \fill (3,2.8) circle (2pt) (3,1.8) circle (2pt) (3,0.6) circle (2pt);
+  % Botón (fila superior, baja a GND por la derecha)
+  \draw (3,2.8) -- (5.5,2.8);
+  \draw (5.5,2.8) circle (1.5pt) (6.5,2.8) circle (1.5pt);
+  \draw (5.55,2.85) -- (6.4,3.2);
+  \node[above] at (6,3.2) {\small Pulsador};
+  \draw (6.55,2.8) -- (9,2.8) -- (9,0.6);
+  % Resistencia y LED (fila del medio)
+  \draw (3,1.8) -- (3.6,1.8);
+  \draw (3.6,1.8) -- (3.7,1.95) -- (3.85,1.65) -- (4,1.95) -- (4.15,1.65) -- (4.3,1.95) -- (4.4,1.8);
+  \node[above] at (4,1.95) {\small 220\,$\Omega$};
+  \draw (4.4,1.8) -- (6.6,1.8);
+  \draw[fill=acento!30] (6.6,1.55) -- (6.6,2.05) -- (7.0,1.8) -- cycle;
+  \draw (7.0,1.55) -- (7.0,2.05);
+  \draw[-{Stealth[length=1.5mm]},thin] (6.8,2.1) -- (7.05,2.4);
+  \draw[-{Stealth[length=1.5mm]},thin] (6.95,2.05) -- (7.2,2.35);
+  \node[below] at (6.8,1.55) {\small LED};
+  \draw (7.0,1.8) -- (7.6,1.8) -- (7.6,0.6);
+  \fill (7.6,0.6) circle (2pt);
+  % GND común
+  \draw (3,0.6) -- (9,0.6);
+\end{tikzpicture}
+\end{center}
+
+\begin{idea}[¿Por qué el botón no lleva resistencia?]
+El código configura el pin con \texttt{INPUT\_PULLUP}: la ESP32 conecta
+internamente el GPIO4 a 3.3\,V a través de una resistencia. Sin presionar, el pin
+lee \texttt{HIGH}; al presionar, el botón lo une a GND y lee \texttt{LOW}. Por eso
+en el código ``presionado'' significa \texttt{LOW}.
+\end{idea}
+
+%==========================================================
+\section{Estructura del repositorio}
+%==========================================================
+
+\begin{lstlisting}[numbers=none,language={}]
+alerta-esp32s3/
+|-- platformio.ini          configuración de la placa y del proyecto
+|-- src/main.cpp            firmware (lo que corre en la ESP32)
+|-- include/
+|   |-- config.h            pines y tiempos
+|   |-- secrets.example.h   plantilla de WiFi / URL del PC
+|   `-- secrets.h           tus datos reales (NO se sube a git)
+|-- pc/servidor_pc.py       servidor que corre en el computador
+|-- docs/explicacion.tex    este documento
+|-- .gitignore              archivos que git ignora
+`-- README.md               instrucciones rápidas
+\end{lstlisting}
+
+La idea de separar en archivos es que cada cosa tenga su lugar: si cambias un pin
+solo tocas \texttt{config.h}; si cambias de red WiFi solo tocas \texttt{secrets.h};
+la lógica en \texttt{main.cpp} no se toca.
+
+%==========================================================
+\section{\texttt{platformio.ini}: configuración del proyecto}
+%==========================================================
+
+PlatformIO lee este archivo para saber para qué placa compilar y cómo.
+
+\begin{lstlisting}[language=ini]
+[env:esp32-s3-devkitc-1]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+monitor_speed = 115200
+; Para que Serial salga por el puerto USB nativo del S3 (quitar si usas el puerto UART)
+build_flags =
+    -D ARDUINO_USB_CDC_ON_BOOT=1
+; Evita que el monitor reinicie o bloquee la placa por el USB nativo
+monitor_rts = 0
+monitor_dtr = 0
+\end{lstlisting}
+
+\begin{description}[leftmargin=*,font=\ttfamily]
+  \item[{[env:...]}] Nombre del ``entorno''. Un proyecto podría tener varios (por
+        ejemplo, para dos placas distintas).
+  \item[platform] Familia de chips: \texttt{espressif32} son las ESP32.
+  \item[board] Modelo exacto de la placa. Define memoria, pines, etc.
+  \item[framework] Usamos el entorno de \textbf{Arduino}, por eso existen
+        \texttt{setup()}, \texttt{loop()}, \texttt{digitalRead()}, etc.
+  \item[monitor\_speed] Velocidad del monitor serial; debe coincidir con
+        \texttt{Serial.begin(115200)}.
+  \item[build\_flags] \texttt{ARDUINO\_USB\_CDC\_ON\_BOOT=1} hace que los mensajes de
+        \texttt{Serial} salgan por el USB nativo del S3 (el COM que aparece como
+        ``Dispositivo serie USB'').
+  \item[monitor\_rts / monitor\_dtr] Evitan que al abrir el monitor la placa se
+        reinicie o quede bloqueada.
+\end{description}
+
+%==========================================================
+\section{\texttt{config.h} y \texttt{secrets.h}: los datos}
+%==========================================================
+
+\subsection{\texttt{config.h}}
+
+\begin{lstlisting}[language=C++]
+#pragma once
+
+// ---------- Pines ----------
+constexpr int PIN_BOTON = 4;   // botón entre GPIO4 y GND (pull-up interno)
+constexpr int PIN_LED   = 2;   // LED + resistencia (220-330 Ω) a GND
+
+// ---------- Tiempos ----------
+constexpr unsigned long VENTANA_MS   = 30000;  // 30 s para cancelar la alerta
+constexpr unsigned long DEBOUNCE_MS  = 50;
+constexpr unsigned long REINTENTO_MS = 3000;   // reintento si falla el envío
+\end{lstlisting}
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{\#pragma once}: evita que el archivo se incluya dos veces al compilar.
+  \item \texttt{constexpr}: constantes fijas que el compilador conoce desde el inicio.
+  \item Los tiempos están en \textbf{milisegundos}: \texttt{30000} ms = 30 s.
+  \item \texttt{DEBOUNCE\_MS}: tiempo para filtrar los rebotes del botón (sección \ref{sec:debounce}).
+  \item \texttt{REINTENTO\_MS}: cada cuánto se reintenta un envío que falló.
+\end{itemize}
+
+\subsection{\texttt{secrets.h}}
+
+\begin{lstlisting}[language=C++]
+#pragma once
+#define WIFI_SSID "TU_RED"
+#define WIFI_PASS "TU_CLAVE"
+#define PC_URL    "http://192.168.1.100:5000/alerta"  // IP que muestra servidor_pc.py
+\end{lstlisting}
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{WIFI\_SSID} y \texttt{WIFI\_PASS}: nombre y clave de la red. La ESP32
+        solo se conecta a redes de \textbf{2.4\,GHz}.
+  \item \texttt{PC\_URL}: dirección del servidor. Tiene tres partes: la IP del
+        computador, el puerto (\texttt{5000}) y la ruta (\texttt{/alerta}).
+  \item Este archivo está en \texttt{.gitignore}, así la clave nunca se sube al repositorio.
+        En el repo solo va \texttt{secrets.example.h} como plantilla.
+\end{itemize}
+
+%==========================================================
+\section{\texttt{main.cpp}: el firmware paso a paso}
+%==========================================================
+
+\subsection{Máquina de estados}
+
+Todo el programa se organiza como una \textbf{máquina de estados}: en cada momento
+el sistema está en uno de tres estados, y ciertos eventos lo hacen pasar a otro.
+
+\begin{center}
+\begin{tikzpicture}[->,>={Stealth[length=3mm]},node distance=4.2cm,thick,
+  every state/.style={fill=acento!10,draw=acento,minimum size=2.2cm,align=center}]
+  \node[state,initial,initial text={arranque}] (E) {ESTABLE\\\small LED off};
+  \node[state,right of=E] (P) {PENDIENTE\\\small LED on};
+  \node[state,right of=P] (S) {ENVIADA\\\small LED on};
+  \path (E) edge[bend left=25] node[above]{\small botón} (P)
+        (P) edge[bend left=25] node[below]{\small botón ($<30$ s)} (E)
+        (P) edge node[above]{\small pasan 30 s} (S);
+\end{tikzpicture}
+\end{center}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Estado} & \textbf{LED} & \textbf{Qué hace}\\
+\midrule
+\texttt{ESTABLE}   & apagado   & Espera que se oprima el botón.\\
+\texttt{PENDIENTE} & encendido & Cuenta 30 s; si se oprime otra vez, cancela.\\
+\texttt{ENVIADA}   & encendido & Envía la alerta al PC (reintenta si falla).\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Librerías y archivos incluidos}
+
+\begin{lstlisting}[language=C++]
+#include <Arduino.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+#include "config.h"
+#include "secrets.h"
+\end{lstlisting}
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{Arduino.h}: funciones básicas (\texttt{pinMode}, \texttt{digitalRead},
+        \texttt{millis}, \texttt{Serial}\ldots). En el Arduino IDE se incluye solo; en
+        PlatformIO hay que ponerlo.
+  \item \texttt{WiFi.h}: conectarse a la red WiFi.
+  \item \texttt{HTTPClient.h}: enviar peticiones HTTP (como un navegador) al servidor.
+  \item Las comillas \texttt{"..."} indican archivos propios del proyecto (carpeta \texttt{include/}).
+\end{itemize}
+
+\subsection{Variables globales}
+
+\begin{lstlisting}[language=C++]
+enum Estado { ESTABLE, PENDIENTE, ENVIADA };
+Estado estado = ESTABLE;
+
+unsigned long tInicioAlerta = 0;
+unsigned long tUltimoIntento = 0;
+bool notificado = false;
+bool primerIntento = true;
+bool avisoConexion = false;      // ya se avisó al PC que la placa está en línea
+unsigned long tAviso = 0;
+
+// Debounce
+int lecturaAnterior = HIGH;
+int estadoBoton = HIGH;
+unsigned long tCambio = 0;
+\end{lstlisting}
+
+Las variables \textbf{globales} se declaran fuera de cualquier función. Eso
+significa que \texttt{setup()}, \texttt{loop()} y todas las demás funciones las
+pueden leer y cambiar, y que \textbf{conservan su valor} entre una vuelta y otra
+del \texttt{loop()}. Son la ``memoria'' del programa: gracias a ellas la placa
+recuerda en qué estado está y cuándo pasó cada cosa.
+
+\begin{idea}[Antes de empezar: ¿qué es \texttt{millis()}?]
+\texttt{millis()} devuelve cuántos milisegundos lleva encendida la placa: justo al
+arrancar vale 0, al segundo vale 1000, a los 10 segundos vale 10\,000, y así
+sigue subiendo. Es como un reloj que nunca se detiene.
+
+Varias variables de abajo guardan un valor de \texttt{millis()} para ``anotar la
+hora'' en que pasó algo. Luego, restando \texttt{millis() - hora\_anotada}, se
+sabe cuánto tiempo ha pasado desde ese momento.
+
+¿Por qué no usar simplemente \texttt{delay(30000)}? Porque \texttt{delay} congela
+la placa: durante esos 30 s no podría leer el botón y nadie podría cancelar la
+alerta. Con \texttt{millis()} el programa nunca se detiene.
+\end{idea}
+
+\subsubsection*{1. \texttt{enum Estado} y \texttt{estado}: en qué parte del proceso vamos}
+
+\begin{lstlisting}[language=C++,numbers=none]
+enum Estado { ESTABLE, PENDIENTE, ENVIADA };
+Estado estado = ESTABLE;
+\end{lstlisting}
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{enum Estado \{ ... \}} \textbf{no guarda nada todavía}: solo inventa
+        un tipo de dato nuevo llamado \texttt{Estado}, que únicamente puede tomar
+        tres valores: \texttt{ESTABLE}, \texttt{PENDIENTE} o \texttt{ENVIADA}.
+  \item Por dentro, el compilador los convierte en números
+        (\texttt{ESTABLE} = 0, \texttt{PENDIENTE} = 1, \texttt{ENVIADA} = 2). Podríamos
+        haber usado esos números directamente, pero compare:
+        \begin{center}
+        \texttt{if (estado == 1)} \quad frente a \quad \texttt{if (estado == PENDIENTE)}
+        \end{center}
+        El segundo se entiende solo; el primero obliga a recordar qué significaba
+        el 1. Además, el compilador no deja asignar un valor que no sea uno de los
+        tres, lo que evita errores.
+  \item \texttt{Estado estado = ESTABLE;} ahora sí \textbf{crea la variable}
+        \texttt{estado} (de tipo \texttt{Estado}) y le da el valor inicial
+        \texttt{ESTABLE}. Por eso, cada vez que la placa enciende o se reinicia,
+        arranca en reposo con el LED apagado.
+  \item A lo largo del programa esta variable se va cambiando
+        (\texttt{estado = PENDIENTE;}, \texttt{estado = ENVIADA;}\ldots) y el
+        \texttt{switch} del \texttt{loop()} la consulta para decidir qué hacer.
+\end{itemize}
+
+\subsubsection*{2. \texttt{tInicioAlerta}: el cronómetro de los 30 segundos}
+
+\begin{lstlisting}[language=C++,numbers=none]
+unsigned long tInicioAlerta = 0;
+\end{lstlisting}
+
+\begin{itemize}[leftmargin=*]
+  \item El nombre significa \emph{tiempo de inicio de la alerta}. Guarda el valor
+        de \texttt{millis()} en el instante exacto en que se oprimió el botón.
+  \item Es \texttt{unsigned long} porque \texttt{millis()} devuelve números muy
+        grandes y nunca negativos (este tipo aguanta hasta unos 49 días).
+  \item Ejemplo paso a paso:
+        \begin{enumerate}
+          \item La placa lleva 12 segundos encendida y se oprime el botón. En ese
+                momento \texttt{millis()} vale 12\,000, así que se anota
+                \texttt{tInicioAlerta = 12000}.
+          \item En cada vuelta del \texttt{loop()} se calcula
+                \texttt{millis() - tInicioAlerta}:
+                \begin{itemize}
+                  \item a los 20\,s de encendida: $20000 - 12000 = 8000$ ms
+                        $\rightarrow$ han pasado 8\,s, todavía se puede cancelar;
+                  \item a los 42\,s de encendida: $42000 - 12000 = 30000$ ms
+                        $\rightarrow$ ya pasaron los 30\,s, se envía la alerta.
+                \end{itemize}
+        \end{enumerate}
+  \item Arranca en 0 porque todavía no se ha oprimido nada; su valor solo importa
+        mientras el estado es \texttt{PENDIENTE}.
+\end{itemize}
+
+\subsubsection*{3. \texttt{notificado}, \texttt{primerIntento}, \texttt{tUltimoIntento}: enviar la alerta sin rendirse}
+
+\begin{lstlisting}[language=C++,numbers=none]
+unsigned long tUltimoIntento = 0;
+bool notificado = false;
+bool primerIntento = true;
+\end{lstlisting}
+
+El envío por WiFi puede fallar (el PC no respondió, la red estaba ocupada\ldots).
+La alerta es importante, así que el programa no se rinde: reintenta hasta que el PC
+confirme. Para eso necesita recordar tres cosas:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Variable} & \textbf{Tipo} & \textbf{Pregunta que responde}\\
+\midrule
+\texttt{notificado}     & sí/no (\texttt{bool}) & ¿El PC ya confirmó que recibió la alerta?\\
+\texttt{primerIntento}  & sí/no (\texttt{bool}) & ¿Todavía no se ha intentado enviar ni una vez?\\
+\texttt{tUltimoIntento} & tiempo (ms)           & ¿A qué hora fue el último intento?\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Así trabajan juntas (ejemplo):
+\begin{enumerate}[leftmargin=*]
+  \item Se cumplen los 30\,s. El programa pone \texttt{notificado = false} (aún no
+        llega) y \texttt{primerIntento = true} (aún no se ha intentado).
+  \item Como \texttt{primerIntento} es \texttt{true}, envía \textbf{de inmediato}.
+        Anota la hora en \texttt{tUltimoIntento} (digamos 42\,000) y pone
+        \texttt{primerIntento = false}.
+  \item \textbf{Si el PC respondió OK}: \texttt{notificado = true}. Listo, no se
+        vuelve a enviar nunca más.
+  \item \textbf{Si falló}: \texttt{notificado} sigue en \texttt{false}. En las
+        siguientes vueltas el programa calcula \texttt{millis() - tUltimoIntento}:
+        a los 43\,000 da 1000 (esperar), a los 45\,000 da 3000 $\rightarrow$ ya
+        pasaron 3\,s, reintenta y anota la nueva hora.
+  \item Se repite el paso 4 cada 3\,s hasta que el PC confirme.
+\end{enumerate}
+
+\textbf{¿Para qué sirve \texttt{primerIntento}?} Para que el primer envío salga al
+instante en vez de esperar 3\,s. \textbf{¿Y por qué esperar 3\,s entre intentos?}
+Porque sin esa pausa la placa intentaría enviar miles de veces por segundo y
+saturaría la red.
+
+\subsubsection*{4. \texttt{avisoConexion}, \texttt{tAviso}: avisar que la placa está en línea}
+
+\begin{lstlisting}[language=C++,numbers=none]
+bool avisoConexion = false;
+unsigned long tAviso = 0;
+\end{lstlisting}
+
+Al encender, la placa le manda al PC el mensaje ``ESP32 conectada'' para
+confirmar que el WiFi funciona. Este envío también puede fallar, así que usa la
+misma idea de reintentos que la alerta, pero con solo dos variables:
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{avisoConexion}: ¿el PC ya confirmó el aviso? Empieza en
+        \texttt{false}; cuando el PC responde OK pasa a \texttt{true} y el aviso
+        no se vuelve a mandar.
+  \item \texttt{tAviso}: a qué hora fue el último intento del aviso. Se usa para
+        reintentar cada 3\,s (\texttt{millis() - tAviso >= 3000}).
+\end{itemize}
+
+Aquí no hace falta un ``primer intento inmediato'': como \texttt{tAviso} empieza en
+0 y la placa tarda varios segundos en arrancar, la resta ya da más de 3000 la
+primera vez y el aviso sale enseguida.
+
+Como se reinician con cada encendido, después de cada \textit{reset} el aviso se
+vuelve a enviar. Por eso sirve para comprobar que la placa quedó enlazada.
+
+\subsubsection*{5. \texttt{lecturaAnterior}, \texttt{estadoBoton}, \texttt{tCambio}: leer bien el botón}
+
+\begin{lstlisting}[language=C++,numbers=none]
+int lecturaAnterior = HIGH;
+int estadoBoton = HIGH;
+unsigned long tCambio = 0;
+\end{lstlisting}
+
+Estas tres son para el \textit{debounce} (filtro de rebotes), que se explica en
+detalle en la sección \ref{sec:debounce}. En resumen:
+
+\begin{center}
+\begin{tabular}{@{}lp{9.3cm}@{}}
+\toprule
+\textbf{Variable} & \textbf{Qué guarda}\\
+\midrule
+\texttt{lecturaAnterior} & Lo que leyó el pin en la vuelta anterior del \texttt{loop()}, aunque sea un rebote.\\
+\texttt{estadoBoton}     & El estado del botón ya \textbf{confirmado} (estable por más de 50\,ms).\\
+\texttt{tCambio}         & La hora del último cambio en la lectura, para medir si ya lleva 50\,ms quieta.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Todas arrancan en \texttt{HIGH} porque, con el \textit{pull-up}, \texttt{HIGH}
+significa ``botón suelto'', que es como está el botón al encender.
+
+\subsection{Lectura del botón con \textit{debounce}}\label{sec:debounce}
+
+\begin{lstlisting}[language=C++]
+bool botonPresionado() {
+  int lectura = digitalRead(PIN_BOTON);
+  if (lectura != lecturaAnterior) tCambio = millis();
+  lecturaAnterior = lectura;
+
+  if (millis() - tCambio > DEBOUNCE_MS && lectura != estadoBoton) {
+    estadoBoton = lectura;
+    if (estadoBoton == LOW) return true;  // flanco de bajada = presionado
+  }
+  return false;
+}
+\end{lstlisting}
+
+Un botón mecánico no pasa limpio de abierto a cerrado: durante unos milisegundos
+``rebota'' y el pin lee \texttt{HIGH, LOW, HIGH, LOW\ldots}. Sin filtro, una sola
+presión se contaría como varias y el sistema se activaría y cancelaría solo.
+
+\begin{enumerate}[leftmargin=*]
+  \item Se lee el pin (línea 2).
+  \item Si la lectura cambió respecto a la anterior, se reinicia el cronómetro
+        \texttt{tCambio} (línea 3). Mientras haya rebotes, el cronómetro se sigue
+        reiniciando.
+  \item Solo cuando la lectura lleva \textbf{más de 50 ms estable} y es distinta al
+        último estado aceptado, se acepta el cambio (líneas 6--7).
+  \item Si el nuevo estado es \texttt{LOW} (presionado), la función devuelve
+        \texttt{true}. Así se detecta el \textbf{momento} de oprimir (flanco de
+        bajada), no el tiempo que se mantiene oprimido.
+\end{enumerate}
+
+\subsection{Conexión al WiFi}
+
+\begin{lstlisting}[language=C++]
+void conectarWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("Conectando WiFi");
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
+    delay(250);
+    Serial.print(".");
+  }
+  Serial.println(WiFi.status() == WL_CONNECTED ? " OK" : " FALLÓ");
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+  }
+}
+\end{lstlisting}
+
+Esta función se encarga de que la placa quede conectada a la red. Se llama antes
+de cada envío, por si el WiFi se cayó en algún momento.
+
+\begin{description}[leftmargin=*,style=nextline]
+  \item[Línea 2 --- ¿ya estoy conectada?]
+        \texttt{WiFi.status()} pregunta el estado de la conexión y
+        \texttt{WL\_CONNECTED} es la respuesta que significa ``conectada''. Si ya lo
+        está, \texttt{return} sale de la función de inmediato: no tiene sentido
+        volver a conectar.
+  \item[Línea 3 --- empezar a conectar]
+        \texttt{WiFi.begin(red, clave)} arranca la conexión con los datos de
+        \texttt{secrets.h}. Ojo: esta línea \emph{no espera} a que termine; solo da
+        la orden. Conectarse toma unos segundos.
+  \item[Líneas 4--5 --- anotar la hora]
+        Escribe ``Conectando WiFi'' en el monitor y guarda en \texttt{t0} la hora de
+        inicio, para poder medir cuánto lleva intentando.
+  \item[Líneas 6--9 --- esperar, pero no para siempre]
+        El \texttt{while} se repite \textbf{mientras se cumplan las dos condiciones}
+        (\texttt{\&\&} significa ``y''):
+        \begin{itemize}
+          \item \texttt{WiFi.status() != WL\_CONNECTED}: todavía \textbf{no} está conectada, y
+          \item \texttt{millis() - t0 < 15000}: han pasado \textbf{menos} de 15\,s.
+        \end{itemize}
+        En cada vuelta espera 250\,ms y escribe un punto. En el monitor se ve así:
+        \texttt{Conectando WiFi.......}. El ciclo termina en cuanto se conecta
+        \textbf{o} se cumplen los 15\,s, lo que pase primero. Sin ese límite, si la
+        red no existe, la placa se quedaría aquí atrapada para siempre.
+  \item[Línea 10 --- decir cómo le fue]
+        Esta línea usa el \textbf{operador ternario}, una forma corta de escribir
+        un \texttt{if/else}. Su forma general es:
+        \begin{center}
+        \texttt{condición ? valor\_si\_es\_verdad : valor\_si\_es\_falso}
+        \end{center}
+        Entonces \texttt{WiFi.status() == WL\_CONNECTED ? " OK" : " FALLÓ"} vale
+        \texttt{" OK"} si se conectó y \texttt{" FALLÓ"} si no. Ese texto se le
+        pasa a \texttt{Serial.println}. Es exactamente lo mismo que escribir:
+\begin{lstlisting}[language=C++,numbers=none]
+if (WiFi.status() == WL_CONNECTED) {
+  Serial.println(" OK");
+} else {
+  Serial.println(" FALLÓ");
+}
+\end{lstlisting}
+        pero en una sola línea. El resultado en el monitor queda
+        \texttt{Conectando WiFi....... OK}.
+  \item[Líneas 11--14 --- mostrar la IP]
+        Solo si se conectó, imprime la dirección IP que el router le asignó a la
+        placa. \texttt{Serial.print} escribe sin saltar de línea y
+        \texttt{Serial.println} escribe y salta de línea, por eso ambas partes
+        quedan juntas: \texttt{IP: 192.168.5.108}. Esa IP identifica a la placa
+        dentro de la red, y es la misma que luego muestra el servidor.
+\end{description}
+
+\subsection{Conexión con indicador en el LED}
+
+\begin{lstlisting}[language=C++]
+void conectarWiFiConLed() {
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("Conectando WiFi");
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
+    digitalWrite(PIN_LED, !digitalRead(PIN_LED));
+    delay(250);
+    Serial.print(".");
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf(" OK\nIP: %s\n", WiFi.localIP().toString().c_str());
+    digitalWrite(PIN_LED, HIGH);
+    delay(2000);
+  } else {
+    Serial.println(" FALLÓ");
+    for (int i = 0; i < 20; i++) {
+      digitalWrite(PIN_LED, !digitalRead(PIN_LED));
+      delay(80);
+    }
+  }
+  digitalWrite(PIN_LED, LOW);
+}
+\end{lstlisting}
+
+Hace lo mismo que \texttt{conectarWiFi()}, pero además usa el LED para mostrar qué
+está pasando. Así se puede saber si la placa se conectó \textbf{sin tener el
+monitor abierto}, por ejemplo cuando está conectada a un cargador. Solo se usa una
+vez, al encender (desde \texttt{setup()}).
+
+\begin{description}[leftmargin=*,style=nextline]
+  \item[Líneas 2--4 --- igual que antes]
+        Da la orden de conectar, escribe el mensaje y anota la hora de inicio.
+  \item[Líneas 5--9 --- parpadeo mientras conecta]
+        Es el mismo \texttt{while} de 15\,s como máximo, con una línea nueva:
+\begin{lstlisting}[language=C++,numbers=none]
+digitalWrite(PIN_LED, !digitalRead(PIN_LED));
+\end{lstlisting}
+        Se lee de adentro hacia afuera:
+        \begin{enumerate}
+          \item \texttt{digitalRead(PIN\_LED)}: ¿cómo está el LED ahora? (\texttt{HIGH} = prendido, \texttt{LOW} = apagado).
+          \item \texttt{!}: significa ``lo contrario''. \texttt{!HIGH} es \texttt{LOW} y \texttt{!LOW} es \texttt{HIGH}.
+          \item \texttt{digitalWrite(PIN\_LED, ...)}: pone el LED en ese valor contrario.
+        \end{enumerate}
+        Resultado: si estaba prendido lo apaga y si estaba apagado lo prende. Como
+        esto se repite cada 250\,ms, el LED \textbf{parpadea} mientras intenta
+        conectar.
+  \item[Líneas 10--13 --- si se conectó: LED fijo 2 segundos]
+        \texttt{Serial.printf} imprime texto con ``huecos'' que se rellenan:
+        \begin{itemize}
+          \item \texttt{\%s} es un hueco para un texto; se rellena con la IP.
+          \item \texttt{\textbackslash n} es un salto de línea.
+          \item \texttt{WiFi.localIP().toString().c\_str()} convierte la IP al tipo
+                de texto que entiende \texttt{printf}: \texttt{localIP()} da la IP,
+                \texttt{toString()} la vuelve texto (\texttt{String}) y
+                \texttt{c\_str()} la pasa al formato de texto básico de C.
+        \end{itemize}
+        En el monitor queda \texttt{ OK} y en la siguiente línea
+        \texttt{IP: 192.168.5.108}. Después prende el LED y lo deja así 2\,s
+        (\texttt{delay(2000)}): esa es la señal de ``conectada''.
+  \item[Líneas 14--20 --- si falló: parpadeo rápido]
+        Escribe \texttt{FALLÓ} y usa un ciclo \texttt{for} que se repite 20 veces
+        (\texttt{i} va de 0 a 19). Cada vez invierte el LED y espera solo 80\,ms.
+        20 cambios equivalen a 10 parpadeos muy rápidos, claramente distintos del
+        parpadeo lento de ``conectando''.
+  \item[Línea 21 --- apagar]
+        Pase lo que pase, al final apaga el LED para empezar en estado
+        \texttt{ESTABLE} (LED apagado).
+\end{description}
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Lo que ves en el LED} & \textbf{Significado}\\
+\midrule
+Parpadeo lento (cada 250\,ms)   & Conectando al WiFi\\
+Fijo 2 segundos y se apaga      & Conectada\\
+Parpadeo muy rápido y se apaga  & No se pudo conectar (revisar red o clave)\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Envío de eventos al computador}
+
+\begin{lstlisting}[language=C++]
+bool enviarEvento(const char* evento) {
+  conectarWiFi();
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  HTTPClient http;
+  http.setConnectTimeout(2000);
+  http.setTimeout(2000);
+  http.begin(PC_URL);
+  http.addHeader("Content-Type", "application/json");
+  String body = String("{\"dispositivo\":\"ESP32-S3\",\"evento\":\"") + evento +
+                "\",\"ip\":\"" + WiFi.localIP().toString() +
+                "\",\"mac\":\"" + WiFi.macAddress() + "\"}";
+  int code = http.POST(body);
+  http.end();
+
+  Serial.printf("Evento %s enviado, respuesta HTTP: %d\n", evento, code);
+  return code == 200;
+}
+
+bool enviarNotificacion() { return enviarEvento("ALERTA"); }
+\end{lstlisting}
+
+Esta función es la que ``habla'' con el computador. Recibe el nombre del evento
+(\texttt{"CONECTADA"} o \texttt{"ALERTA"}), lo envía y devuelve
+\texttt{true} si el PC confirmó que lo recibió o \texttt{false} si no.
+
+\begin{idea}[¿Qué es HTTP y qué es un POST?]
+HTTP es el mismo idioma que usa un navegador para pedir páginas web. Hay varios
+tipos de mensajes; un \textbf{POST} significa ``te envío estos datos''. La ESP32
+actúa como un navegador que envía un formulario, y el servidor de Python actúa
+como la página web que lo recibe y contesta. La respuesta trae un
+\textbf{código}: \texttt{200} significa ``recibido OK'', \texttt{404} ``esa
+dirección no existe'', y un número negativo significa que ni siquiera se pudo
+conectar.
+\end{idea}
+
+\begin{description}[leftmargin=*,style=nextline]
+  \item[Línea 1 --- la firma de la función]
+        \texttt{bool} indica que devuelve verdadero o falso.
+        \texttt{const char* evento} es el texto que se le pasa (por ejemplo
+        \texttt{"ALERTA"}); \texttt{const} indica que la función no lo modifica.
+  \item[Líneas 2--3 --- asegurar el WiFi]
+        Llama a \texttt{conectarWiFi()}. Si aun así no hay conexión, devuelve
+        \texttt{false} de una vez: no tiene sentido intentar enviar sin red.
+  \item[Líneas 5--7 --- preparar el cliente]
+        \texttt{HTTPClient http;} crea el ``navegador''. Los dos \texttt{Timeout}
+        ponen un límite de 2\,s para conectar y 2\,s para esperar respuesta. Si el
+        PC está apagado o el firewall bloquea, la placa se rinde a los 2\,s en
+        lugar de quedarse esperando mucho rato (y así puede seguir leyendo el
+        botón).
+  \item[Líneas 8--9 --- a dónde y en qué formato]
+        \texttt{http.begin(PC\_URL)} fija la dirección de destino
+        (\texttt{http://192.168.5.106:5000/alerta}). \texttt{addHeader} le avisa al
+        servidor que los datos van en formato \textbf{JSON}.
+  \item[Líneas 10--12 --- armar el mensaje]
+        Se construye el texto JSON pegando pedazos con \texttt{+}. Las
+        \texttt{\textbackslash"} son comillas que van \emph{dentro} del texto (sin la
+        barra, C++ pensaría que el texto terminó). Pedazo a pedazo:
+        \begin{center}\small
+        \begin{tabular}{@{}ll@{}}
+        \toprule
+        \textbf{Pedazo del código} & \textbf{Queda en el mensaje}\\
+        \midrule
+        \texttt{"\{\textbackslash"dispositivo\textbackslash":\textbackslash"ESP32-S3\textbackslash",} & \texttt{\{"dispositivo":"ESP32-S3",}\\
+        \texttt{\textbackslash"evento\textbackslash":\textbackslash""} & \texttt{"evento":"}\\
+        \texttt{evento} & \texttt{ALERTA}\\
+        \texttt{"\textbackslash",\textbackslash"ip\textbackslash":\textbackslash""} & \texttt{","ip":"}\\
+        \texttt{WiFi.localIP().toString()} & \texttt{192.168.5.108}\\
+        \texttt{"\textbackslash",\textbackslash"mac\textbackslash":\textbackslash""} & \texttt{","mac":"}\\
+        \texttt{WiFi.macAddress()} & \texttt{E0:72:A1:AA:20:84}\\
+        \texttt{"\textbackslash"\}"} & \texttt{"\}}\\
+        \bottomrule
+        \end{tabular}
+        \end{center}
+        Todo junto:
+\begin{lstlisting}[numbers=none,language={}]
+{"dispositivo":"ESP32-S3","evento":"ALERTA","ip":"192.168.5.108","mac":"E0:72:A1:AA:20:84"}
+\end{lstlisting}
+        La \textbf{MAC} es un identificador único de fábrica de la placa; sirve
+        para distinguirla si algún día hay varias.
+  \item[Línea 13 --- enviar]
+        \texttt{http.POST(body)} envía el mensaje y \textbf{espera la respuesta} del
+        servidor. El código de respuesta se guarda en \texttt{code}.
+  \item[Línea 14 --- cerrar]
+        \texttt{http.end()} cierra la conexión y libera memoria. Si no se cierra,
+        la placa se va quedando sin memoria después de muchos envíos.
+  \item[Línea 16 --- reportar]
+        Imprime en el monitor algo como
+        \texttt{Evento ALERTA enviado, respuesta HTTP: 200}. Aquí hay dos huecos:
+        \texttt{\%s} (texto) se rellena con \texttt{evento} y \texttt{\%d} (número
+        entero) con \texttt{code}.
+  \item[Línea 17 --- ¿funcionó?]
+        \texttt{code == 200} es \texttt{true} solo si el servidor contestó OK. Ese
+        valor es el que se devuelve, y es el que usan \texttt{notificado} y
+        \texttt{avisoConexion} para decidir si hay que reintentar.
+  \item[Línea 20 --- atajo]
+        \texttt{enviarNotificacion()} no hace nada nuevo: solo llama a
+        \texttt{enviarEvento("ALERTA")}. Existe para que en el \texttt{loop()} se lea
+        más claro qué se está enviando.
+\end{description}
+
+\subsection{\texttt{setup()}: lo que pasa al encender}
+
+\begin{lstlisting}[language=C++]
+void setup() {
+  Serial.begin(115200);
+  unsigned long t0 = millis();
+  while (!Serial && millis() - t0 < 3000) delay(10);  // espera al monitor USB
+
+  pinMode(PIN_BOTON, INPUT_PULLUP);
+  pinMode(PIN_LED, OUTPUT);
+  digitalWrite(PIN_LED, LOW);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  conectarWiFiConLed();
+  Serial.println("Estado: ESTABLE");
+}
+\end{lstlisting}
+
+\texttt{setup()} se ejecuta \textbf{una sola vez} al encender o al dar \textit{reset}:
+
+\begin{enumerate}[leftmargin=*]
+  \item Abre el puerto serial y espera hasta 3 s a que el monitor se conecte.
+  \item Configura el botón como entrada con \textit{pull-up} y el LED como salida (apagado).
+  \item \texttt{WIFI\_STA}: la ESP32 se conecta a una red existente (modo ``estación'',
+        como un celular), no crea su propia red.
+  \item \texttt{setAutoReconnect(true)}: si el WiFi se cae, se reconecta sola.
+  \item Conecta al WiFi mostrando el estado con el LED.
+\end{enumerate}
+
+\subsection{\texttt{loop()}: el ciclo principal}
+
+\texttt{loop()} se repite \textbf{miles de veces por segundo} mientras la placa esté
+encendida. Cada vuelta es muy rápida porque nunca se usa \texttt{delay} largo.
+
+\subsubsection*{Parte 1: leer el botón y avisar conexión}
+
+\begin{lstlisting}[language=C++]
+void loop() {
+  bool presion = botonPresionado();
+
+  // Aviso "CONECTADA" al PC: se reintenta cada 3 s hasta que el servidor responda
+  if (!avisoConexion && estado == ESTABLE && WiFi.status() == WL_CONNECTED &&
+      millis() - tAviso >= REINTENTO_MS) {
+    tAviso = millis();
+    avisoConexion = enviarEvento("CONECTADA");
+  }
+\end{lstlisting}
+
+\begin{itemize}[leftmargin=*]
+  \item Se lee el botón una vez por vuelta y se guarda en \texttt{presion}.
+  \item Mientras no se haya confirmado el aviso de conexión, y la placa esté en
+        reposo y con WiFi, se intenta enviar \texttt{"CONECTADA"} cada 3 s.
+        Cuando el servidor responde OK, \texttt{avisoConexion} pasa a \texttt{true} y
+        no se vuelve a enviar.
+\end{itemize}
+
+\subsubsection*{Parte 2: la máquina de estados}
+
+\begin{lstlisting}[language=C++,firstnumber=10]
+  switch (estado) {
+    case ESTABLE:
+      if (presion) {
+        estado = PENDIENTE;
+        tInicioAlerta = millis();
+        digitalWrite(PIN_LED, HIGH);
+        Serial.println("Estado: ALERTA (30 s para cancelar)");
+      }
+      break;
+\end{lstlisting}
+
+\textbf{ESTABLE:} si se oprime el botón, pasa a \texttt{PENDIENTE}, guarda la hora
+exacta y enciende el LED.
+
+\begin{lstlisting}[language=C++,firstnumber=19]
+    case PENDIENTE:
+      if (presion) {  // cancelado a tiempo
+        estado = ESTABLE;
+        digitalWrite(PIN_LED, LOW);
+        Serial.println("Cancelado -> Estado: ESTABLE");
+      } else if (millis() - tInicioAlerta >= VENTANA_MS) {
+        estado = ENVIADA;
+        notificado = false;
+        primerIntento = true;
+        Serial.println("30 s cumplidos -> enviando alerta");
+      }
+      break;
+\end{lstlisting}
+
+\textbf{PENDIENTE:} en cada vuelta se revisan dos cosas:
+\begin{itemize}[leftmargin=*]
+  \item Si se oprimió otra vez $\rightarrow$ fue un accidente: vuelve a
+        \texttt{ESTABLE} y apaga el LED.
+  \item Si ya pasaron 30 s desde \texttt{tInicioAlerta} $\rightarrow$ es una alerta
+        real: pasa a \texttt{ENVIADA} y prepara el envío.
+\end{itemize}
+
+\begin{lstlisting}[language=C++,firstnumber=31]
+    case ENVIADA:
+      // LED queda encendido; se reintenta hasta que el PC confirme
+      if (!notificado && (primerIntento || millis() - tUltimoIntento >= REINTENTO_MS)) {
+        primerIntento = false;
+        tUltimoIntento = millis();
+        notificado = enviarNotificacion();
+      }
+      break;
+  }
+}
+\end{lstlisting}
+
+\textbf{ENVIADA:} el LED sigue encendido. Si la alerta aún no fue confirmada, se
+envía: la primera vez de inmediato y, si falla, cada 3 s hasta que el servidor
+responda OK. Después de eso el sistema se queda en este estado (el botón ya no hace
+nada) hasta que se reinicie la placa.
+
+%==========================================================
+\section{\texttt{servidor\_pc.py}: el receptor en el computador}
+%==========================================================
+
+Es un servidor web mínimo hecho solo con la librería estándar de Python (no hay que
+instalar nada).
+
+\subsection{Importaciones y puerto}
+
+\begin{lstlisting}[language=Python]
+import json
+import socket
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+PUERTO = 5000
+\end{lstlisting}
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{json}: convertir el texto recibido en un diccionario de Python.
+  \item \texttt{socket}: averiguar la IP del computador.
+  \item \texttt{datetime}: poner fecha y hora a cada mensaje.
+  \item \texttt{http.server}: el servidor web.
+  \item \texttt{PUERTO = 5000}: la ``puerta'' por donde entra la conexión. Debe
+        coincidir con el \texttt{:5000} de \texttt{PC\_URL}.
+\end{itemize}
+
+\subsection{El manejador de peticiones}
+
+\begin{idea}[¿Qué es una clase y qué es \texttt{self}?]
+Una \textbf{clase} es como un molde que agrupa funciones relacionadas. Aquí la
+clase \texttt{Handler} (``manejador'') reúne todo lo que el servidor hace cuando
+llega un mensaje. \texttt{(BaseHTTPRequestHandler)} significa que la clase
+\textbf{hereda} de un manejador que ya trae Python: ya sabe leer mensajes HTTP y
+responder, y nosotros solo escribimos qué hacer con ellos.
+
+\texttt{self} es ``este mensaje que acaba de llegar''. A través de \texttt{self}
+se accede a todo lo del mensaje: la ruta (\texttt{self.path}), los encabezados
+(\texttt{self.headers}), quién lo envió (\texttt{self.client\_address}), etc.
+\end{idea}
+
+\subsubsection*{Parte 1: recibir y leer el mensaje}
+
+\begin{lstlisting}[language=Python,firstnumber=13]
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        if self.path != "/alerta":
+            self.send_response(404)
+            self.end_headers()
+            return
+        largo = int(self.headers.get("Content-Length", 0))
+        datos = self.rfile.read(largo).decode(errors="ignore")
+        try:
+            datos = json.loads(datos)
+        except json.JSONDecodeError:
+            pass
+\end{lstlisting}
+
+\begin{description}[leftmargin=*,style=nextline]
+  \item[Línea 14 --- \texttt{do\_POST}]
+        El nombre no es casual: Python llama \textbf{automáticamente} a la función
+        \texttt{do\_POST} cada vez que llega un POST. Es la pareja del
+        \texttt{http.POST(body)} de la ESP32. Nadie la llama a mano.
+  \item[Líneas 15--18 --- revisar la dirección]
+        \texttt{self.path} es la ruta a la que llegó el mensaje. Si no es
+        \texttt{/alerta} (por ejemplo, alguien escribió mal la URL), responde
+        \texttt{404} (``no existe''), cierra los encabezados de la respuesta y
+        \texttt{return} termina sin hacer nada más.
+  \item[Línea 19 --- ¿qué tan largo es el mensaje?]
+        Todo mensaje HTTP trae un encabezado \texttt{Content-Length} que dice
+        cuántos bytes mide el contenido. \texttt{.get("Content-Length", 0)} lo lee
+        (y si no viene, usa 0). \texttt{int(...)} lo convierte de texto a número.
+  \item[Línea 20 --- leer el contenido]
+        \texttt{self.rfile} es el ``archivo'' por donde llegan los datos.
+        \texttt{.read(largo)} lee exactamente esa cantidad de bytes, y
+        \texttt{.decode(...)} los convierte de bytes a texto normal.
+        \texttt{errors="ignore"} evita que el servidor se caiga si viene algún
+        carácter raro. Ahora \texttt{datos} es un texto como
+        \texttt{\{"evento":"ALERTA", ...\}}.
+  \item[Líneas 21--24 --- convertir el JSON]
+        \texttt{json.loads} convierte ese texto en un \textbf{diccionario} de
+        Python, con el que se puede preguntar \texttt{datos["evento"]} y obtener
+        \texttt{"ALERTA"}. El \texttt{try/except} es una red de seguridad: si el
+        texto no es JSON válido, en vez de caerse el programa, sigue
+        (\texttt{pass} = no hacer nada) y \texttt{datos} se queda como texto.
+\end{description}
+
+\subsubsection*{Parte 2: decidir qué mostrar y responder}
+
+\begin{lstlisting}[language=Python,firstnumber=25]
+        hora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        evento = datos.get("evento") if isinstance(datos, dict) else None
+        if evento == "CONECTADA":
+            print(f"[{hora}] ESP32 conectada al WiFi desde {self.client_address[0]}")
+        else:
+            print("\a")  # pitido de consola
+            print("=" * 50)
+            print(f"  ¡ALERTA RECIBIDA!  {hora}")
+            print(f"  Desde: {self.client_address[0]}  Datos: {datos}")
+            print("=" * 50)
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+\end{lstlisting}
+
+\begin{description}[leftmargin=*,style=nextline]
+  \item[Línea 25 --- la hora]
+        \texttt{datetime.now()} da la fecha y hora actuales, y \texttt{strftime}
+        les da formato. Cada código se reemplaza por un dato: \texttt{\%Y} año,
+        \texttt{\%m} mes, \texttt{\%d} día, \texttt{\%H} hora, \texttt{\%M}
+        minutos, \texttt{\%S} segundos. Resultado: \texttt{2026-09-25 21:32:19}.
+  \item[Línea 26 --- ¿qué evento es?]
+        También es un ternario, en su versión de Python:
+        \begin{center}
+        \texttt{valor\_si\_verdad if condición else valor\_si\_falso}
+        \end{center}
+        \texttt{isinstance(datos, dict)} pregunta si \texttt{datos} sí quedó
+        convertido en diccionario. Si sí, saca el campo \texttt{"evento"}; si no
+        (el JSON venía dañado), usa \texttt{None} (``nada'').
+  \item[Líneas 27--28 --- mensaje de conexión]
+        Si el evento es \texttt{"CONECTADA"}, imprime una sola línea. La
+        \texttt{f} antes de las comillas crea un \textbf{f-string}: lo que va entre
+        llaves \texttt{\{ \}} se reemplaza por su valor.
+        \texttt{self.client\_address[0]} es la IP de quien envió el mensaje, o sea,
+        la placa. Resultado:
+        \texttt{[2026-09-25 21:32:19] ESP32 conectada al WiFi desde 192.168.5.108}.
+  \item[Líneas 29--34 --- mensaje de alerta]
+        Cualquier otro evento se trata como alerta y se muestra llamativo:
+        \begin{itemize}
+          \item \texttt{print("\textbackslash a")}: \texttt{\textbackslash a} es un carácter especial
+                que hace sonar un pitido en la terminal.
+          \item \texttt{"=" * 50}: en Python, multiplicar un texto lo repite; esto
+                dibuja una línea de 50 signos \texttt{=}.
+          \item Luego imprime el título con la hora, y la IP y los datos que llegaron.
+        \end{itemize}
+  \item[Líneas 35--37 --- responder OK]
+        \texttt{send\_response(200)} arma la respuesta ``recibido OK'',
+        \texttt{end\_headers()} cierra los encabezados, y
+        \texttt{wfile.write(b"OK")} escribe el contenido (la \texttt{b} indica que
+        va en bytes). \textbf{Esto es clave}: ese \texttt{200} es exactamente el
+        \texttt{code} que recibe la ESP32 en la línea \texttt{int code = http.POST(body)}.
+        Si no llega, la placa asume que falló y reintenta cada 3\,s.
+\end{description}
+
+\subsubsection*{Parte 3: silenciar el registro automático}
+
+\begin{lstlisting}[language=Python,firstnumber=39]
+    def log_message(self, *args):
+        pass  # silencia el log por defecto
+\end{lstlisting}
+
+Por defecto, \texttt{BaseHTTPRequestHandler} imprime una línea técnica por cada
+mensaje que llega, algo como:
+\begin{lstlisting}[numbers=none,language={}]
+192.168.5.108 - - [25/Sep/2026 21:32:19] "POST /alerta HTTP/1.1" 200 -
+\end{lstlisting}
+Para hacerlo, llama internamente a una función llamada \texttt{log\_message}. Al
+escribir nuestra propia \texttt{log\_message} dentro de \texttt{Handler}, la
+\textbf{reemplazamos}. La nuestra solo tiene \texttt{pass} (no hace nada), así que
+esas líneas desaparecen y en la terminal solo quedan nuestros mensajes, limpios.
+\texttt{*args} significa ``acepta cualquier cantidad de datos'', porque Python le
+pasa varios y no nos interesa ninguno.
+
+\subsection{Arranque del servidor}
+
+\begin{lstlisting}[language=Python,firstnumber=43]
+if __name__ == "__main__":
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except OSError:
+        ip = "desconocida"
+    finally:
+        s.close()
+    print(f"Escuchando en http://{ip}:{PUERTO}/alerta")
+    print("Pon esa IP en PC_URL del sketch del ESP32.")
+    HTTPServer(("0.0.0.0", PUERTO), Handler).serve_forever()
+\end{lstlisting}
+
+\begin{description}[leftmargin=*,style=nextline]
+  \item[Línea 43 --- punto de arranque]
+        \texttt{if \_\_name\_\_ == "\_\_main\_\_":} significa ``ejecuta esto solo si
+        el archivo se corrió directamente'' (con \texttt{python pc/servidor\_pc.py}).
+        Es la forma estándar de marcar dónde empieza un programa en Python.
+  \item[Líneas 44--51 --- averiguar la IP del PC]
+        Un computador puede tener varias IP (WiFi, cable, VPN\ldots). Para saber
+        cuál usa en la red local se hace un truco:
+        \begin{enumerate}
+          \item Se crea una ``conexión'' de red tipo UDP con
+                \texttt{socket.socket(AF\_INET, SOCK\_DGRAM)} (\texttt{AF\_INET} = direcciones IPv4).
+          \item \texttt{s.connect(("8.8.8.8", 80))} la apunta hacia un servidor de
+                Google. Con UDP esto \textbf{no envía nada}; solo obliga al sistema a
+                decidir por cuál tarjeta de red saldría.
+          \item \texttt{s.getsockname()[0]} pregunta qué IP local eligió. Esa es la
+                IP del PC en tu red (\texttt{192.168.5.106}).
+          \item \texttt{except OSError}: si no hay red, en vez de caerse pone
+                \texttt{"desconocida"}.
+          \item \texttt{finally}: pase lo que pase, \texttt{s.close()} cierra la
+                conexión.
+        \end{enumerate}
+  \item[Líneas 52--53 --- mostrar la dirección]
+        Imprime la URL completa, que es justo lo que hay que copiar en
+        \texttt{PC\_URL} de \texttt{secrets.h}.
+  \item[Línea 54 --- arrancar y quedarse escuchando]
+        Esta línea hace tres cosas:
+        \begin{itemize}
+          \item \texttt{("0.0.0.0", PUERTO)}: escuchar en el puerto 5000 por
+                \textbf{todas} las tarjetas de red del PC, para que la ESP32 lo
+                encuentre sin importar por cuál llegue.
+          \item \texttt{Handler}: cada mensaje que llegue se atiende con nuestra
+                clase (la que tiene \texttt{do\_POST}).
+          \item \texttt{.serve\_forever()}: se queda esperando mensajes
+                \textbf{para siempre}. Por eso la terminal parece ``congelada'' con
+                el cursor: está escuchando. Se detiene con \texttt{Ctrl+C}.
+        \end{itemize}
+\end{description}
+
+%==========================================================
+\section{Flujo completo}
+%==========================================================
+
+\begin{center}
+\begin{tikzpicture}[
+  font=\small, >={Stealth[length=2.5mm]},
+  msg/.style={->,thick}, ev/.style={align=left,font=\footnotesize}]
+  \node (U) at (0,0) {\textbf{Usuario}};
+  \node (E) at (4.5,0) {\textbf{ESP32-S3}};
+  \node (P) at (9,0) {\textbf{PC (servidor)}};
+  \foreach \x in {0,4.5,9} \draw[gray,dashed] (\x,-0.3) -- (\x,-9.4);
+  \draw[msg] (4.5,-0.8) -- node[above]{POST \texttt{CONECTADA}} (9,-0.8);
+  \draw[msg] (9,-1.3) -- node[above]{\texttt{200 OK}} (4.5,-1.3);
+  \node[ev,right] at (9.1,-1.05) {``ESP32 conectada''};
+  \draw[msg] (0,-2.2) -- node[above]{oprime botón} (4.5,-2.2);
+  \node[ev,left] at (4.4,-2.7) {LED on, cuenta 30 s};
+  \draw[msg] (0,-3.4) -- node[above]{oprime otra vez} (4.5,-3.4);
+  \node[ev,left] at (4.4,-3.9) {cancelado, LED off};
+  \draw[gray] (-0.4,-4.4) -- (9.6,-4.4);
+  \draw[msg] (0,-5.2) -- node[above]{oprime botón} (4.5,-5.2);
+  \node[ev,left] at (4.4,-5.7) {LED on, cuenta 30 s};
+  \draw[thick,gray,dotted] (4.7,-5.9) -- (4.7,-7.2);
+  \node[ev,right] at (4.8,-6.55) {pasan 30 s};
+  \draw[msg] (4.5,-7.6) -- node[above]{POST \texttt{ALERTA}} (9,-7.6);
+  \node[ev,right] at (9.1,-7.85) {``¡ALERTA RECIBIDA!''};
+  \draw[msg] (9,-8.1) -- node[above]{\texttt{200 OK}} (4.5,-8.1);
+  \node[ev,left] at (4.4,-8.8) {LED queda on};
+\end{tikzpicture}
+\end{center}
+
+%==========================================================
+\section{Uso y solución de problemas}
+%==========================================================
+
+\subsection{Pasos de uso}
+\begin{enumerate}[leftmargin=*]
+  \item En el PC: \texttt{python pc/servidor\_pc.py} y dejar esa terminal abierta.
+  \item Poner la IP que muestra el servidor en \texttt{PC\_URL} de \texttt{secrets.h}.
+  \item Subir el firmware con \textbf{Upload} ($\rightarrow$) en PlatformIO.
+  \item Dar \textit{reset} a la placa y comprobar que aparece ``ESP32 conectada''.
+\end{enumerate}
+
+\subsection{Problemas comunes}
+
+\begin{center}
+\begin{tabular}{@{}p{5.2cm}p{9.5cm}@{}}
+\toprule
+\textbf{Síntoma} & \textbf{Qué revisar}\\
+\midrule
+LED parpadea rápido al arrancar & Nombre o clave del WiFi en \texttt{secrets.h}; que la red sea de 2.4\,GHz.\\
+LED fijo 2 s pero no llega nada al PC & Que el servidor esté corriendo; firewall de Windows (puerto 5000); que la IP del PC no haya cambiado.\\
+\texttt{Could not open COM..} al subir & Cable USB conectado; escoger el puerto correcto; modo carga manual: mantener BOOT, pulsar RST, soltar BOOT.\\
+Monitor serial en blanco & Normal si se abrió después de arrancar; dar RST con el monitor abierto.\\
+Cambiar de computador & Correr el servidor en el otro PC, poner su IP en \texttt{PC\_URL} y volver a subir el código.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{document}

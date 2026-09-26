@@ -1,7 +1,3 @@
-// ESP32-S3 - Botón de alerta con ventana de cancelación de 30 s
-// ESTABLE --(botón)--> PENDIENTE (LED ON, cuenta 30 s)
-// PENDIENTE --(botón antes de 30 s)--> ESTABLE (LED OFF)
-// PENDIENTE --(pasan 30 s)--> ENVIADA (notifica al PC por WiFi, LED sigue ON)
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -30,7 +26,7 @@ bool botonPresionado() {
 
   if (millis() - tCambio > DEBOUNCE_MS && lectura != estadoBoton) {
     estadoBoton = lectura;
-    if (estadoBoton == LOW) return true;  // flanco de bajada = presionado
+    if (estadoBoton == LOW) return true;  
   }
   return false;
 }
@@ -40,7 +36,7 @@ void conectarWiFi() {
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.print("Conectando WiFi");
   unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
     delay(250);
     Serial.print(".");
   }
@@ -51,29 +47,62 @@ void conectarWiFi() {
   }
 }
 
-bool enviarNotificacion() {
+bool enviarEvento(const char* evento) {
   conectarWiFi();
   if (WiFi.status() != WL_CONNECTED) return false;
 
   HTTPClient http;
   http.begin(PC_URL);
   http.addHeader("Content-Type", "application/json");
-  String body = "{\"dispositivo\":\"ESP32-S3\",\"evento\":\"ALERTA\",\"mac\":\"" +
-                WiFi.macAddress() + "\"}";
+  String body = String("{\"dispositivo\":\"ESP32-S3\",\"evento\":\"") + evento +
+                "\",\"ip\":\"" + WiFi.localIP().toString() +
+                "\",\"mac\":\"" + WiFi.macAddress() + "\"}";
   int code = http.POST(body);
   http.end();
 
-  Serial.printf("Notificación enviada, respuesta HTTP: %d\n", code);
+  Serial.printf("Evento %s enviado, respuesta HTTP: %d\n", evento, code);
   return code == 200;
+}
+
+bool enviarNotificacion() { return enviarEvento("ALERTA"); }
+
+// Parpadea el LED mientras intenta conectar al WiFi (máx. 15 s).
+// Al terminar: conectado = LED fijo 2 s; sin WiFi = 10 parpadeos rápidos ( esto solo lo puse porque no sabia si me estaba leyendo:)).
+void conectarWiFiConLed() {
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("Conectando WiFi");
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
+    digitalWrite(PIN_LED, !digitalRead(PIN_LED));
+    delay(250);
+    Serial.print(".");
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf(" OK\nIP: %s\n", WiFi.localIP().toString().c_str());
+    digitalWrite(PIN_LED, HIGH);
+    delay(2000);
+  } else {
+    Serial.println(" FALLÓ");
+    for (int i = 0; i < 20; i++) {
+      digitalWrite(PIN_LED, !digitalRead(PIN_LED));
+      delay(80);
+    }
+  }
+  digitalWrite(PIN_LED, LOW);
 }
 
 void setup() {
   Serial.begin(115200);
+  unsigned long t0 = millis();
+  while (!Serial && millis() - t0 < 3000) delay(10);  // espera al monitor USB
+
   pinMode(PIN_BOTON, INPUT_PULLUP);
   pinMode(PIN_LED, OUTPUT);
   digitalWrite(PIN_LED, LOW);
   WiFi.mode(WIFI_STA);
-  conectarWiFi();
+  WiFi.setAutoReconnect(true);
+  conectarWiFiConLed();
+  enviarEvento("CONECTADA");  // aviso al PC de que la placa está en línea
   Serial.println("Estado: ESTABLE");
 }
 
@@ -91,7 +120,7 @@ void loop() {
       break;
 
     case PENDIENTE:
-      if (presion) {  // cancelado a tiempo
+      if (presion) {  
         estado = ESTABLE;
         digitalWrite(PIN_LED, LOW);
         Serial.println("Cancelado -> Estado: ESTABLE");
