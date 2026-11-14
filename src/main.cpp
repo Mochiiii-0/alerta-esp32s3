@@ -13,7 +13,19 @@ enum Estado { ESTABLE, PENDIENTE };
 Estado estado = ESTABLE;
 
 unsigned long tInicioAlerta = 0;
-bool yaHuboAlerta = false;       // después de la primera alerta enviada, el LED queda encendido
+unsigned long tLedApagadoHasta = 0;  // después de enviar una alerta, el LED se apaga un momento
+
+// LED: titila mientras vigila, fijo mientras cuenta los 30 s,
+// y se apaga un momento cuando se envía la alerta.
+void actualizarLed() {
+  if (estado == PENDIENTE) {
+    digitalWrite(PIN_LED, HIGH);                        // contando: fijo
+  } else if (millis() < tLedApagadoHasta) {
+    digitalWrite(PIN_LED, LOW);                         // alerta enviada: apagado un momento
+  } else {
+    digitalWrite(PIN_LED, (millis() / LED_TITILEO_MS) % 2 ? HIGH : LOW);  // vigilando: titila
+  }
+}
 // Causas de la alerta: se pueden sumar (por ejemplo RITMO + CAIDA)
 const uint8_t C_BOTON = 1, C_RITMO = 2, C_CAIDA = 4;
 uint8_t causas = 0;
@@ -359,7 +371,6 @@ void loop() {
     case PENDIENTE:
       if (presion) {
         estado = ESTABLE;
-        digitalWrite(PIN_LED, yaHuboAlerta ? HIGH : LOW);
         Serial.println("Cancelado -> Estado: ESTABLE");
       } else {
         // Si durante el conteo pasa otra cosa, se suma a la alerta
@@ -369,12 +380,12 @@ void loop() {
       if (estado == PENDIENTE && millis() - tInicioAlerta >= VENTANA_MS) {
         Serial.printf("30 s cumplidos -> enviando alerta por %s (y sigo vigilando)\n", textoCausas(causas).c_str());
         encolarAlerta(causas);
-        yaHuboAlerta = true;
-        digitalWrite(PIN_LED, HIGH);  // el LED queda encendido
-        estado = ESTABLE;             // vuelve a vigilar: otra caída o pulso alto manda otra alerta
+        tLedApagadoHasta = millis() + LED_APAGADO_MS;  // el LED se apaga un momento
+        estado = ESTABLE;             // vuelve a vigilar (LED titilando): otra caída o pulso alto manda otra alerta
       }
       break;
   }
 
+  actualizarLed();
   atenderEnvios();
 }

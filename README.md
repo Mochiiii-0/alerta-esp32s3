@@ -6,9 +6,9 @@ Botón de alerta con LED, sensor de pulso y detector de caídas, con notificaci�
 
 | Estado | LED | Qué pasa |
 |---|---|---|
-| **ESTABLE** | Apagado | Esperando. Pasa a PENDIENTE si se oprime el botón, el pulso llega a 110 BPM o se detecta una caída. |
+| **ESTABLE** | Titilando | Esperando. Pasa a PENDIENTE si se oprime el botón, el pulso llega a 110 BPM o se detecta una caída. |
 | **PENDIENTE** | Encendido | Hay 30 s para volver a oprimir y cancelar (vuelve a ESTABLE). |
-| **ENVIADA** | Encendido | Pasaron los 30 s: se envía la notificación al PC (si falla, reintenta cada 3 s, máximo 5 veces) y **sigue vigilando**: otra caída o pulso alto inicia otro conteo y manda otra alerta. |
+| **ENVIADA** | Se apaga 1 s y vuelve a titilar | Pasaron los 30 s: se envía la notificación al PC (si falla, reintenta cada 3 s, máximo 5 veces) y **sigue vigilando**: otra caída o pulso alto inicia otro conteo y manda otra alerta. |
 
 ```
 ESTABLE ──botón / pulso ≥ 110 / caída──▶ PENDIENTE ──30 s──▶ ENVIADA

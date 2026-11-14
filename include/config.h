@@ -7,6 +7,8 @@ constexpr int PIN_LED   = 2;   // LED + resistencia (220-330 Ω) a GND
 // ---------- Tiempos ----------
 constexpr unsigned long VENTANA_MS   = 30000;  // 30 s para cancelar la alerta
 constexpr unsigned long DEBOUNCE_MS  = 50;
+constexpr unsigned long LED_TITILEO_MS = 500;   // vigilando: el LED cambia cada 0.5 s
+constexpr unsigned long LED_APAGADO_MS = 1000;  // al enviar una alerta: apagado 1 s
 constexpr unsigned long REINTENTO_MS = 3000;   // reintento si falla el envío
 constexpr int MAX_INTENTOS = 5;                 // si falla 5 veces, deja de reintentar esa alerta
 
