@@ -90,8 +90,6 @@ void actualizarPulso() {
       if (nIbis < 5) nIbis++;
     } else {
       nIbis = 0;                                        // latido raro: empezar a contar de nuevo
-      bpm = 0;
-      estadoPulso = "señal irregular (ruido), se ignora";
     }
     if (nIbis == 5) {
       unsigned long suma = 0, minIbi = ibis[0], maxIbi = ibis[0];

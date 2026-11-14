@@ -19,12 +19,15 @@ constexpr unsigned long MUESTREO_MS = 10;  // leer los sensores cada 10 ms
 // Ritmo cardíaco
 constexpr int UMBRAL_BPM         = 110;    // desde aquí empieza el conteo de 30 s
 constexpr int PULSO_AMPLITUD_MIN = 25;     // por debajo = no hay dedo / señal plana
-constexpr int PULSO_BASE_MIN      = 300;    // señal promedio pegada abajo = sensor apagado
-constexpr int PULSO_BASE_MAX      = 3800;   // señal promedio pegada arriba = sensor mal conectado
-constexpr float PULSO_REGULARIDAD = 1.7f;   // el latido más lento no puede durar 70% más que el más rápido
-constexpr unsigned long IBI_MIN_MS = 333;   // 180 BPM: más rápido que esto se toma como ruido
-constexpr unsigned long IBI_MAX_MS = 1500;  // 40 BPM: más lento que esto se toma como ruido
-constexpr unsigned long RITMO_CONFIRMA_MS = 2000;  // el pulso debe estar alto 2 s seguidos
+
+// Filtros anti-ruido: APAGADOS (lee como al inicio, aunque sea con ruido).
+// Para prenderlos: BASE 300/3800, REGULARIDAD 1.3, IBI 333/1500, CONFIRMA 5000.
+constexpr int PULSO_BASE_MIN      = 0;      // 0 = no revisa si el sensor está apagado
+constexpr int PULSO_BASE_MAX      = 4096;   // 4096 = no revisa si el sensor está apagado
+constexpr float PULSO_REGULARIDAD = 100.0f; // 100 = acepta latidos disparejos
+constexpr unsigned long IBI_MIN_MS = 300;   // 200 BPM
+constexpr unsigned long IBI_MAX_MS = 2000;  // 30 BPM
+constexpr unsigned long RITMO_CONFIRMA_MS = 0;  // 0 = dispara apenas llega a UMBRAL_BPM
 
 // Caídas
 constexpr float CAIDA_LIBRE_G             = 0.5f;  // casi sin peso = está cayendo
