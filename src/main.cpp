@@ -14,7 +14,17 @@ unsigned long tInicioAlerta = 0;
 unsigned long tUltimoIntento = 0;
 bool notificado = false;
 bool primerIntento = true;
-const char* causaAlerta = "";   // qué disparó el conteo: BOTON, RITMO o CAIDA
+// Causas de la alerta: se pueden sumar (por ejemplo RITMO + CAIDA)
+const uint8_t C_BOTON = 1, C_RITMO = 2, C_CAIDA = 4;
+uint8_t causas = 0;
+
+String textoCausas() {
+  String t = "";
+  if (causas & C_BOTON) t += "BOTON";
+  if (causas & C_RITMO) t += (t.length() ? "+RITMO" : "RITMO");
+  if (causas & C_CAIDA) t += (t.length() ? "+CAIDA" : "CAIDA");
+  return t;
+}
 
 // Debounce
 int lecturaAnterior = HIGH;
@@ -45,6 +55,8 @@ unsigned long tMuestraPulso = 0;
 unsigned long ibis[5];           // tiempos entre latidos (ms) de los últimos 5 latidos
 int nIbis = 0, iIbi = 0;
 bool ritmoArmado = true;         // false = ya avisó; espera a que el pulso baje
+const char* estadoPulso = "sin lectura (¿dedo bien puesto?)";
+unsigned long tRitmoAltoDesde = 0;  // desde cuándo el pulso está alto (0 = no está alto)
 
 void actualizarPulso() {
   if (millis() - tMuestraPulso < MUESTREO_MS) return;
@@ -55,8 +67,15 @@ void actualizarPulso() {
   lineaBase += (v - lineaBase) * 0.005f;                // promedio lento
   amplitud  += (fabsf(v - lineaBase) - amplitud) * 0.01f;
 
+  // Sensor apagado o desconectado: la señal se queda pegada abajo o arriba
+  if (lineaBase < PULSO_BASE_MIN || lineaBase > PULSO_BASE_MAX) {
+    bpm = 0; nIbis = 0; sobreUmbral = false;
+    estadoPulso = "sensor apagado o desconectado (¿prende su luz verde?)";
+    return;
+  }
   if (amplitud < PULSO_AMPLITUD_MIN) {                  // señal plana: sin dedo
     bpm = 0; nIbis = 0; sobreUmbral = false;
+    estadoPulso = "sin lectura (¿dedo bien puesto?)";
     return;
   }
 
@@ -65,30 +84,47 @@ void actualizarPulso() {
     sobreUmbral = true;
     unsigned long ibi = ahora - tUltimoLatido;
     tUltimoLatido = ahora;
-    if (ibi >= 300 && ibi <= 2000) {                    // entre 30 y 200 BPM
+    if (ibi >= IBI_MIN_MS && ibi <= IBI_MAX_MS) {       // entre 40 y 180 BPM
       ibis[iIbi] = ibi;
       iIbi = (iIbi + 1) % 5;
       if (nIbis < 5) nIbis++;
     } else {
       nIbis = 0;                                        // latido raro: empezar a contar de nuevo
+      bpm = 0;
+      estadoPulso = "señal irregular (ruido), se ignora";
     }
     if (nIbis == 5) {
-      unsigned long suma = 0;
-      for (int i = 0; i < 5; i++) suma += ibis[i];
-      bpm = 60000UL * 5 / suma;                         // promedio de 5 latidos
+      unsigned long suma = 0, minIbi = ibis[0], maxIbi = ibis[0];
+      for (int i = 0; i < 5; i++) {
+        suma += ibis[i];
+        if (ibis[i] < minIbi) minIbi = ibis[i];
+        if (ibis[i] > maxIbi) maxIbi = ibis[i];
+      }
+      // Un corazón late parejo; el ruido da tiempos muy distintos entre "latidos"
+      if (maxIbi > minIbi * PULSO_REGULARIDAD) {
+        bpm = 0;
+        estadoPulso = "señal irregular (ruido), se ignora";
+      } else {
+        bpm = 60000UL * 5 / suma;                       // promedio de 5 latidos
+      }
     }
   } else if (sobreUmbral && v < lineaBase) {
     sobreUmbral = false;
   }
 
-  if (ahora - tUltimoLatido > 2000) { bpm = 0; nIbis = 0; }  // 2 s sin latidos
+  if (ahora - tUltimoLatido > 2000) {                   // 2 s sin latidos
+    bpm = 0; nIbis = 0;
+    estadoPulso = "sin lectura (¿dedo bien puesto?)";
+  }
 }
 
-// true una sola vez cuando el pulso llega a UMBRAL_BPM.
-// Vuelve a avisar solo después de que el pulso baje de UMBRAL_BPM - 5.
+// true cuando el pulso lleva RITMO_CONFIRMA_MS seguidos en UMBRAL_BPM o más.
+// Después de avisar, vuelve a avisar solo cuando el pulso baje de UMBRAL_BPM - 5.
 bool ritmoAlto() {
   if (bpm > 0 && bpm < UMBRAL_BPM - 5) ritmoArmado = true;
-  return ritmoArmado && bpm >= UMBRAL_BPM;
+  if (bpm < UMBRAL_BPM) { tRitmoAltoDesde = 0; return false; }
+  if (tRitmoAltoDesde == 0) tRitmoAltoDesde = millis();
+  return ritmoArmado && millis() - tRitmoAltoDesde >= RITMO_CONFIRMA_MS;
 }
 
 // =====================================================================
@@ -145,12 +181,19 @@ bool detectarCaida() {
 }
 
 // Pasa a PENDIENTE: LED encendido y empieza el conteo de 30 s
-void iniciarConteo(const char* causa) {
+void iniciarConteo(uint8_t nuevas) {
   estado = PENDIENTE;
-  causaAlerta = causa;
+  causas = nuevas;
   tInicioAlerta = millis();
   digitalWrite(PIN_LED, HIGH);
-  Serial.printf("Estado: ALERTA por %s (30 s para cancelar con el botón)\n", causa);
+  Serial.printf("Estado: ALERTA por %s (30 s para cancelar con el botón)\n", textoCausas().c_str());
+}
+
+// Durante el conteo se puede sumar otra causa (por ejemplo, una caída mientras el pulso está alto)
+void agregarCausa(uint8_t c) {
+  if (causas & c) return;
+  causas |= c;
+  Serial.printf("Se suma otra causa: ahora la alerta es por %s\n", textoCausas().c_str());
 }
 
 void conectarWiFi() {
@@ -188,7 +231,10 @@ bool enviarEvento(const char* evento, const char* causa = "") {
   return code == 200;
 }
 
-bool enviarNotificacion() { return enviarEvento("ALERTA", causaAlerta); }
+bool enviarNotificacion() {
+  String c = textoCausas();
+  return enviarEvento("ALERTA", c.c_str());
+}
 
 // Parpadea el LED mientras intenta conectar al WiFi (máx. 15 s).
 // Al terminar: conectado = LED fijo 2 s; sin WiFi = 10 parpadeos rápidos ( esto solo lo puse porque no sabia si me estaba leyendo:)).
@@ -243,27 +289,34 @@ void loop() {
   if (millis() - tImpresion >= 2000) {
     tImpresion = millis();
     if (bpm > 0) Serial.printf("Pulso: %d BPM\n", bpm);
-    else Serial.println("Pulso: sin lectura (¿dedo bien puesto?)");
+    else Serial.printf("Pulso: %s\n", estadoPulso);
   }
 
   switch (estado) {
-    case ESTABLE:
-      if (presion) {
-        iniciarConteo("BOTON");
-      } else if (caida) {
-        iniciarConteo("CAIDA");
-      } else if (ritmoAlto()) {
+    case ESTABLE: {
+      // Se revisan las tres causas a la vez: si pasan juntas, la alerta las lleva todas
+      uint8_t nuevas = 0;
+      if (presion) nuevas |= C_BOTON;
+      if (caida)   nuevas |= C_CAIDA;
+      if (ritmoAlto()) {
         ritmoArmado = false;          // no volver a avisar hasta que el pulso baje
-        iniciarConteo("RITMO");
+        nuevas |= C_RITMO;
       }
+      if (nuevas) iniciarConteo(nuevas);
       break;
+    }
 
     case PENDIENTE:
       if (presion) {  
         estado = ESTABLE;
         digitalWrite(PIN_LED, LOW);
         Serial.println("Cancelado -> Estado: ESTABLE");
-      } else if (millis() - tInicioAlerta >= VENTANA_MS) {
+      } else {
+        // Si durante el conteo pasa otra cosa, se suma a la alerta
+        if (caida) agregarCausa(C_CAIDA);
+        if (ritmoAlto()) { ritmoArmado = false; agregarCausa(C_RITMO); }
+      }
+      if (estado == PENDIENTE && millis() - tInicioAlerta >= VENTANA_MS) {
         estado = ENVIADA;
         notificado = false;
         primerIntento = true;

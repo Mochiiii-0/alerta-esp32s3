@@ -25,7 +25,9 @@ ESTABLE ──botón / pulso ≥ 110 / caída──▶ PENDIENTE ──30 s─�
 | Pulso XD-58C | S → GPIO5 · + → 3V3 · − → GND |
 | MPU6050 | SDA → GPIO8 · SCL → GPIO9 · VCC → 3V3 · GND → GND |
 
-La alerta que llega al PC incluye la causa: `BOTON`, `RITMO` o `CAIDA`.
+La alerta que llega al PC incluye la causa: `BOTON`, `RITMO` o `CAIDA`. Si pasan varias durante el conteo, se suman (por ejemplo `RITMO+CAIDA`).
+
+El pulso se ignora si la señal está pegada (sensor apagado) o si los latidos son muy disparejos (ruido), y solo dispara si se mantiene en 110 BPM o más durante 5 s.
 
 Los pines y tiempos se cambian en [`include/config.h`](include/config.h).
 
