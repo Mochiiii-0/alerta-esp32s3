@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <Wire.h>
 
 #include "config.h"
 #include "secrets.h"
@@ -13,6 +14,7 @@ unsigned long tInicioAlerta = 0;
 unsigned long tUltimoIntento = 0;
 bool notificado = false;
 bool primerIntento = true;
+const char* causaAlerta = "";   // qué disparó el conteo: BOTON, RITMO o CAIDA
 
 // Debounce
 int lecturaAnterior = HIGH;
@@ -31,6 +33,126 @@ bool botonPresionado() {
   return false;
 }
 
+// =====================================================================
+//  Sensor de pulso XD-58C (salida analógica)
+// =====================================================================
+int bpm = 0;                     // pulsaciones por minuto (0 = sin lectura)
+float lineaBase = 2048;          // valor promedio de la señal
+float amplitud = 0;              // tamaño típico de la onda de pulso
+bool sobreUmbral = false;        // la onda está en su parte alta
+unsigned long tUltimoLatido = 0;
+unsigned long tMuestraPulso = 0;
+unsigned long ibis[5];           // tiempos entre latidos (ms) de los últimos 5 latidos
+int nIbis = 0, iIbi = 0;
+bool ritmoArmado = true;         // false = ya avisó; espera a que el pulso baje
+
+void actualizarPulso() {
+  if (millis() - tMuestraPulso < MUESTREO_MS) return;
+  tMuestraPulso = millis();
+  unsigned long ahora = tMuestraPulso;
+
+  int v = analogRead(PIN_PULSO);
+  lineaBase += (v - lineaBase) * 0.005f;                // promedio lento
+  amplitud  += (fabsf(v - lineaBase) - amplitud) * 0.01f;
+
+  if (amplitud < PULSO_AMPLITUD_MIN) {                  // señal plana: sin dedo
+    bpm = 0; nIbis = 0; sobreUmbral = false;
+    return;
+  }
+
+  // Latido = la señal sube por encima de la mitad de la onda
+  if (!sobreUmbral && v > lineaBase + amplitud * 0.5f && ahora - tUltimoLatido > 300) {
+    sobreUmbral = true;
+    unsigned long ibi = ahora - tUltimoLatido;
+    tUltimoLatido = ahora;
+    if (ibi >= 300 && ibi <= 2000) {                    // entre 30 y 200 BPM
+      ibis[iIbi] = ibi;
+      iIbi = (iIbi + 1) % 5;
+      if (nIbis < 5) nIbis++;
+    } else {
+      nIbis = 0;                                        // latido raro: empezar a contar de nuevo
+    }
+    if (nIbis == 5) {
+      unsigned long suma = 0;
+      for (int i = 0; i < 5; i++) suma += ibis[i];
+      bpm = 60000UL * 5 / suma;                         // promedio de 5 latidos
+    }
+  } else if (sobreUmbral && v < lineaBase) {
+    sobreUmbral = false;
+  }
+
+  if (ahora - tUltimoLatido > 2000) { bpm = 0; nIbis = 0; }  // 2 s sin latidos
+}
+
+// true una sola vez cuando el pulso llega a UMBRAL_BPM.
+// Vuelve a avisar solo después de que el pulso baje de UMBRAL_BPM - 5.
+bool ritmoAlto() {
+  if (bpm > 0 && bpm < UMBRAL_BPM - 5) ritmoArmado = true;
+  return ritmoArmado && bpm >= UMBRAL_BPM;
+}
+
+// =====================================================================
+//  Acelerómetro MPU6050 (I2C) - detección de caídas
+// =====================================================================
+const uint8_t MPU_ADDR = 0x68;
+bool mpuOk = false;
+bool enCaidaLibre = false;
+unsigned long tCaidaLibre = 0;
+unsigned long tMuestraMPU = 0;
+
+bool iniciarMPU() {
+  Wire.begin(PIN_SDA, PIN_SCL);
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x6B); Wire.write(0x00);                   // despertar el sensor
+  if (Wire.endTransmission() != 0) return false;
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x1C); Wire.write(0x10);                   // rango ±8 g
+  Wire.endTransmission();
+  return true;
+}
+
+// Devuelve la aceleración total en g (1 g = quieto). -1 si falla la lectura.
+float leerAceleracionG() {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x3B);
+  if (Wire.endTransmission(false) != 0) return -1;
+  if (Wire.requestFrom(MPU_ADDR, (uint8_t)6) != 6) return -1;
+  uint8_t b[6];
+  for (int i = 0; i < 6; i++) b[i] = Wire.read();       // leer en orden
+  int16_t ax = (b[0] << 8) | b[1];
+  int16_t ay = (b[2] << 8) | b[3];
+  int16_t az = (b[4] << 8) | b[5];
+  float x = ax / 4096.0f, y = ay / 4096.0f, z = az / 4096.0f;  // ±8 g -> 4096 por g
+  return sqrtf(x * x + y * y + z * z);
+}
+
+// Caída = caída libre (casi 0 g) seguida de un golpe fuerte en menos de 1 s.
+bool detectarCaida() {
+  if (!mpuOk || millis() - tMuestraMPU < MUESTREO_MS) return false;
+  tMuestraMPU = millis();
+  float g = leerAceleracionG();
+  if (g < 0) return false;
+
+  if (g < CAIDA_LIBRE_G) {
+    if (!enCaidaLibre) { enCaidaLibre = true; tCaidaLibre = millis(); }
+  } else if (enCaidaLibre && g > IMPACTO_G) {
+    enCaidaLibre = false;
+    Serial.printf("Caída detectada (golpe de %.1f g)\n", g);
+    return true;
+  }
+  if (enCaidaLibre && millis() - tCaidaLibre > VENTANA_IMPACTO_MS) enCaidaLibre = false;
+  return false;
+}
+
+// Pasa a PENDIENTE: LED encendido y empieza el conteo de 30 s
+void iniciarConteo(const char* causa) {
+  estado = PENDIENTE;
+  causaAlerta = causa;
+  tInicioAlerta = millis();
+  digitalWrite(PIN_LED, HIGH);
+  Serial.printf("Estado: ALERTA por %s (30 s para cancelar con el botón)\n", causa);
+}
+
 void conectarWiFi() {
   if (WiFi.status() == WL_CONNECTED) return;
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -47,7 +169,7 @@ void conectarWiFi() {
   }
 }
 
-bool enviarEvento(const char* evento) {
+bool enviarEvento(const char* evento, const char* causa = "") {
   conectarWiFi();
   if (WiFi.status() != WL_CONNECTED) return false;
 
@@ -56,7 +178,9 @@ bool enviarEvento(const char* evento) {
   http.addHeader("Content-Type", "application/json");
   String body = String("{\"dispositivo\":\"ESP32-S3\",\"evento\":\"") + evento +
                 "\",\"ip\":\"" + WiFi.localIP().toString() +
-                "\",\"mac\":\"" + WiFi.macAddress() + "\"}";
+                "\",\"mac\":\"" + WiFi.macAddress() + "\"";
+  if (causa[0] != '\0') body += String(",\"causa\":\"") + causa + "\"";
+  body += "}";
   int code = http.POST(body);
   http.end();
 
@@ -64,7 +188,7 @@ bool enviarEvento(const char* evento) {
   return code == 200;
 }
 
-bool enviarNotificacion() { return enviarEvento("ALERTA"); }
+bool enviarNotificacion() { return enviarEvento("ALERTA", causaAlerta); }
 
 // Parpadea el LED mientras intenta conectar al WiFi (máx. 15 s).
 // Al terminar: conectado = LED fijo 2 s; sin WiFi = 10 parpadeos rápidos ( esto solo lo puse porque no sabia si me estaba leyendo:)).
@@ -99,6 +223,9 @@ void setup() {
   pinMode(PIN_BOTON, INPUT_PULLUP);
   pinMode(PIN_LED, OUTPUT);
   digitalWrite(PIN_LED, LOW);
+  analogReadResolution(12);                 // pulso: valores de 0 a 4095
+  mpuOk = iniciarMPU();
+  Serial.println(mpuOk ? "MPU6050 OK" : "MPU6050 no encontrado: revisa SDA/SCL (caídas desactivadas)");
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   conectarWiFiConLed();
@@ -108,14 +235,26 @@ void setup() {
 
 void loop() {
   bool presion = botonPresionado();
+  actualizarPulso();
+  bool caida = detectarCaida();
+
+  // Muestra el pulso cada 2 s en el monitor (para revisar el sensor)
+  static unsigned long tImpresion = 0;
+  if (millis() - tImpresion >= 2000) {
+    tImpresion = millis();
+    if (bpm > 0) Serial.printf("Pulso: %d BPM\n", bpm);
+    else Serial.println("Pulso: sin lectura (¿dedo bien puesto?)");
+  }
 
   switch (estado) {
     case ESTABLE:
       if (presion) {
-        estado = PENDIENTE;
-        tInicioAlerta = millis();
-        digitalWrite(PIN_LED, HIGH);
-        Serial.println("Estado: ALERTA (30 s para cancelar)");
+        iniciarConteo("BOTON");
+      } else if (caida) {
+        iniciarConteo("CAIDA");
+      } else if (ritmoAlto()) {
+        ritmoArmado = false;          // no volver a avisar hasta que el pulso baje
+        iniciarConteo("RITMO");
       }
       break;
 

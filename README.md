@@ -1,19 +1,19 @@
 # Alerta ESP32-S3
 
-Botón de alerta con LED y notificación al computador por WiFi.
+Botón de alerta con LED, sensor de pulso y detector de caídas, con notificación al computador por WiFi.
 
 ## Funcionamiento
 
 | Estado | LED | Qué pasa |
 |---|---|---|
-| **ESTABLE** | Apagado | Esperando. Al oprimir el botón pasa a PENDIENTE. |
+| **ESTABLE** | Apagado | Esperando. Pasa a PENDIENTE si se oprime el botón, el pulso llega a 110 BPM o se detecta una caída. |
 | **PENDIENTE** | Encendido | Hay 30 s para volver a oprimir y cancelar (vuelve a ESTABLE). |
 | **ENVIADA** | Encendido | Pasaron los 30 s: se envía la notificación al PC. Si falla, reintenta cada 3 s. |
 
 ```
-ESTABLE ──botón──▶ PENDIENTE ──30 s──▶ ENVIADA
-   ▲                   │
-   └──────botón────────┘
+ESTABLE ──botón / pulso ≥ 110 / caída──▶ PENDIENTE ──30 s──▶ ENVIADA
+   ▲                                      │
+   └───────────────botón──────────────────┘
 ```
 
 ## Hardware
@@ -22,6 +22,10 @@ ESTABLE ──botón──▶ PENDIENTE ──30 s──▶ ENVIADA
 |---|---|
 | Botón | GPIO4 ↔ GND (usa pull-up interno) |
 | LED | GPIO2 → resistencia 220–330 Ω → LED → GND |
+| Pulso XD-58C | S → GPIO5 · + → 3V3 · − → GND |
+| MPU6050 | SDA → GPIO8 · SCL → GPIO9 · VCC → 3V3 · GND → GND |
+
+La alerta que llega al PC incluye la causa: `BOTON`, `RITMO` o `CAIDA`.
 
 Los pines y tiempos se cambian en [`include/config.h`](include/config.h).
 
