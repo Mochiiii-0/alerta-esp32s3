@@ -1,0 +1,1412 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish,es-noquoting]{babel}
+\usepackage{lmodern}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,automata,shapes.geometric,calc,decorations.pathreplacing,fit,backgrounds}
+\usepackage[most]{tcolorbox}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+
+% ---------------- Paleta ----------------
+\definecolor{tinta}{RGB}{30,41,59}
+\definecolor{acento}{RGB}{0,110,130}
+\definecolor{cBoton}{RGB}{230,126,0}     % botón
+\definecolor{cPulso}{RGB}{200,40,70}     % pulso
+\definecolor{cCaida}{RGB}{34,140,80}     % caída / acelerómetro
+\definecolor{cEsp}{RGB}{60,80,160}       % ESP32
+\definecolor{cPC}{RGB}{110,70,160}       % computador
+\definecolor{cLed}{RGB}{220,170,0}       % LED
+\definecolor{cGnd}{RGB}{40,40,40}
+\definecolor{c3v3}{RGB}{215,38,61}
+\definecolor{fondo}{RGB}{247,248,250}
+\definecolor{clave}{RGB}{0,82,155}
+\definecolor{coment}{RGB}{100,120,100}
+\definecolor{cadena}{RGB}{163,21,21}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{fondo},
+  keywordstyle=\color{clave}\bfseries,
+  commentstyle=\color{coment}\itshape,
+  stringstyle=\color{cadena},
+  numbers=left, numberstyle=\tiny\color{gray}, numbersep=8pt,
+  frame=single, rulecolor=\color{gray!40},
+  breaklines=true, showstringspaces=false, tabsize=2,
+  xleftmargin=1.5em, framexleftmargin=1.2em,
+  literate={á}{{\'a}}1 {é}{{\'e}}1 {í}{{\'i}}1 {ó}{{\'o}}1 {ú}{{\'u}}1
+           {Á}{{\'A}}1 {É}{{\'E}}1 {Í}{{\'I}}1 {Ó}{{\'O}}1 {Ú}{{\'U}}1
+           {ñ}{{\~n}}1 {¡}{{!`}}1 {¿}{{?`}}1 {Ω}{{$\Omega$}}1 {±}{{$\pm$}}1
+}
+\lstdefinelanguage{ini}{morecomment=[l]{;}, morekeywords={platform,board,framework,monitor_speed,build_flags,monitor_rts,monitor_dtr}}
+
+\newtcolorbox{nota}[1][]{colback=acento!6,colframe=acento,fonttitle=\bfseries,title=#1,arc=2pt,boxrule=0.6pt,before upper={\setlength{\parskip}{4pt}}}
+\newtcolorbox{analogia}[1][]{colback=cEsp!6,colframe=cEsp,fonttitle=\bfseries,title={Analogía con software: #1},arc=2pt,boxrule=0.6pt,before upper={\setlength{\parskip}{4pt}}}
+\newtcolorbox{ojo}[1][]{colback=cPulso!6,colframe=cPulso,fonttitle=\bfseries,title=#1,arc=2pt,boxrule=0.6pt}
+
+\newcommand{\chip}[2]{{\setlength{\fboxsep}{1.6pt}\fcolorbox{#1}{#1!15}{\textcolor{#1!70!black}{\scriptsize\bfseries\ttfamily #2}}}}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small Alerta ESP32-S3}
+\rhead{\small Funcionamiento del sistema}
+\cfoot{\thepage}
+\setlength{\headheight}{14pt}
+
+\title{\textbf{Alerta ESP32-S3}\\[6pt]\large Funcionamiento del sistema: hardware, lógica y comunicación}
+\author{Sara Otero}
+\date{\today}
+
+\begin{document}
+\shorthandoff{"}
+\maketitle
+
+\begin{nota}[A quién va dirigido]
+Este documento explica cómo funciona el dispositivo de alerta para personas con
+formación en sistemas. La parte de software (estados, HTTP, JSON, colas) se presenta
+de forma directa; la parte electrónica (voltajes, sensores, buses de comunicación)
+se explica desde cero, con analogías a conceptos de software cuando ayudan.
+\end{nota}
+
+\tableofcontents
+\newpage
+
+%=====================================================================
+\section{Visión general}
+%=====================================================================
+
+El dispositivo es un \textbf{sistema embebido} (un computador pequeño dedicado a una
+sola tarea) que vigila tres posibles situaciones de emergencia de la persona que lo
+lleva y avisa a un computador por WiFi:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Causa} & \textbf{Qué la dispara} & \textbf{Sensor}\\
+\midrule
+\chip{cBoton}{BOTON} & La persona oprime el botón de pánico & Pulsador\\
+\chip{cPulso}{RITMO} & El ritmo cardíaco llega a 110 pulsaciones por minuto o más & XD-58C\\
+\chip{cCaida}{CAIDA} & Se detecta una caída (caída libre seguida de un golpe) & MPU6050\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Cualquiera de las tres abre una \textbf{ventana de 30 segundos} en la que la persona
+puede cancelar con el botón (por si fue un falso positivo). Si nadie cancela, se envía
+la alerta al computador. El dispositivo nunca deja de vigilar: después de enviar una
+alerta sigue leyendo los sensores, y cada evento nuevo genera su propia alerta.
+
+\subsection{Arquitectura}
+
+\begin{center}
+\begin{tikzpicture}[
+  font=\small,
+  sen/.style={draw,rounded corners=4pt,minimum width=2.9cm,minimum height=1cm,align=center,line width=0.8pt},
+  flecha/.style={-{Stealth[length=3mm]},line width=1pt}]
+  \node[sen,draw=cBoton,fill=cBoton!12] (b) at (0,2.2) {Botón\\\scriptsize entrada digital};
+  \node[sen,draw=cPulso,fill=cPulso!12] (p) at (0,0.7) {Sensor de pulso\\\scriptsize XD-58C, analógico};
+  \node[sen,draw=cCaida,fill=cCaida!12] (a) at (0,-0.8) {Acelerómetro\\\scriptsize MPU6050, bus I2C};
+  \node[sen,draw=cLed,fill=cLed!15] (l) at (0,-2.3) {LED\\\scriptsize salida digital};
+  \node[draw=cEsp,fill=cEsp!10,rounded corners=6pt,line width=1pt,minimum width=3.6cm,minimum height=5.4cm,align=center] (e) at (4.9,0) {\textbf{ESP32-S3}\\[2pt]\scriptsize microcontrolador\\[8pt]\scriptsize \texttt{src/main.cpp}\\\scriptsize máquina de estados\\\scriptsize + lectura de sensores\\\scriptsize + cola de envíos};
+  \node[draw=cPC,fill=cPC!10,rounded corners=6pt,line width=1pt,minimum width=3.2cm,minimum height=2.2cm,align=center] (pc) at (11.6,0) {\textbf{Computador}\\[2pt]\scriptsize \texttt{pc/servidor\_pc.py}\\\scriptsize servidor HTTP};
+  \draw[flecha,cBoton] (b.east) -- (b.east -| e.west);
+  \draw[flecha,cPulso] (p.east) -- (p.east -| e.west);
+  \draw[flecha,cCaida,{Stealth[length=3mm]}-{Stealth[length=3mm]}] (a.east) -- (a.east -| e.west);
+  \draw[flecha,cLed] (l.east -| e.west) -- (l.east);
+  \draw[flecha,cPC,dashed] (e.east) -- node[above]{\scriptsize WiFi} node[below]{\scriptsize HTTP POST + JSON} (pc.west);
+\end{tikzpicture}
+\end{center}
+
+Hay dos programas que corren en lugares distintos:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Firmware} (el programa que vive grabado en el microcontrolador):
+        \texttt{src/main.cpp}, en C++ con el framework de Arduino. Lee los sensores,
+        decide y envía.
+  \item \textbf{Servidor} en el computador: \texttt{pc/servidor\_pc.py}, en Python sin
+        dependencias externas. Recibe las alertas y las muestra.
+\end{itemize}
+
+%=====================================================================
+\section{Conceptos de electrónica necesarios}
+%=====================================================================
+
+Esta sección resume lo mínimo de electrónica para entender el resto del documento.
+
+\subsection{Voltaje, 3V3 y GND}
+
+El \textbf{voltaje} es la ``presión'' eléctrica entre dos puntos, medida en voltios (V).
+En este circuito hay dos referencias que aparecen en todas partes:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{3V3} (3.3 V): la alimentación. Es lo que la ESP32 le entrega a los sensores
+        para que funcionen.
+  \item \textbf{GND} (\emph{ground}, tierra): la referencia de 0 V. Es el camino de regreso
+        de la corriente. Todos los componentes deben compartir el mismo GND; si no, sus
+        voltajes no son comparables.
+\end{itemize}
+
+\begin{analogia}[GND común]
+Es como un sistema de coordenadas compartido: un valor de ``3.3 V'' solo tiene sentido
+si todos miden desde el mismo cero. Dos dispositivos sin GND común son como dos
+servicios con relojes no sincronizados comparando \emph{timestamps}.
+\end{analogia}
+
+\subsection{GPIO: los pines del microcontrolador}
+
+Un \textbf{GPIO} (\emph{General Purpose Input/Output}) es un pin que el programa puede
+usar como entrada o como salida. Se identifican por número: GPIO4, GPIO2, etc.
+
+\begin{center}
+\begin{tabular}{@{}>{\bfseries}l p{11cm}@{}}
+\toprule
+Modo & Qué significa\\
+\midrule
+Salida digital & El programa escribe \texttt{HIGH} (3.3 V) o \texttt{LOW} (0 V). Así se prende y apaga el LED.\\
+Entrada digital & El programa lee si el pin está en \texttt{HIGH} o \texttt{LOW}. Así se lee el botón.\\
+Entrada analógica & El programa lee un \emph{voltaje continuo} y lo convierte en un número (ver ADC). Así se lee el sensor de pulso.\\
+Bus de datos (I2C) & Dos pines que juntos forman un canal de comunicación con otro chip. Así se habla con el acelerómetro.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{ADC: convertir voltaje en números}
+
+El \textbf{ADC} (\emph{Analog to Digital Converter}) mide un voltaje y lo traduce a un entero.
+En la ESP32-S3 la resolución es de 12 bits:
+
+\begin{center}
+\begin{tikzpicture}[font=\small]
+  \shade[left color=cEsp!5,right color=cEsp!45] (0,0) rectangle (10,0.6);
+  \draw (0,0) rectangle (10,0.6);
+  \foreach \x/\v/\n in {0/0 V/0, 5/1.65 V/2048, 10/3.3 V/4095} {
+    \draw (\x,0) -- (\x,-0.15);
+    \node[below] at (\x,-0.15) {\texttt{\n}};
+    \node[above] at (\x,0.6) {\v};
+  }
+  \node[left] at (-0.2,0.3) {voltaje};
+  \node[left] at (-0.2,-0.45) {número leído};
+\end{tikzpicture}
+\end{center}
+
+La función \texttt{analogRead(PIN\_PULSO)} devuelve ese número, entre 0 y 4095.
+
+\subsection{Pull-up: por qué el botón ``presionado'' es LOW}
+
+Un pin de entrada que no está conectado a nada queda \textbf{flotando}: lee valores
+aleatorios porque capta ruido eléctrico. Para evitarlo se usa una resistencia de
+\textbf{pull-up}, que conecta el pin débilmente a 3.3 V. La ESP32 trae una interna, que
+se activa con \texttt{pinMode(PIN\_BOTON, INPUT\_PULLUP)}.
+
+\begin{center}
+\begin{tikzpicture}[font=\small,thick]
+  \node[draw=cEsp,fill=cEsp!10,rounded corners,minimum width=2.4cm,minimum height=1.8cm] (esp) at (0,0) {GPIO4};
+  \draw (1.2,0) -- (3,0) coordinate (n);
+  \draw (n) -- ++(0,0.5);
+  \draw[c3v3] (3,0.5) -- (3,0.7) -- (2.85,0.8) -- (3.15,0.95) -- (2.85,1.1) -- (3.15,1.25) -- (3,1.35) -- (3,1.6);
+  \node[c3v3,right] at (3.15,1.05) {\scriptsize pull-up interno};
+  \node[c3v3,above] at (3,1.6) {3V3};
+  \draw (n) -- (4.5,0);
+  \draw (4.5,0) -- (4.5,-0.2); \draw (4.3,-0.2) -- (4.75,-0.55); \draw (4.5,-0.65) -- (4.5,-1);
+  \node[right] at (4.8,-0.4) {\scriptsize botón};
+  \draw (4.3,-1) -- (4.7,-1); \draw (4.37,-1.1) -- (4.63,-1.1); \draw (4.44,-1.2) -- (4.56,-1.2);
+  \node[below] at (4.5,-1.2) {\scriptsize GND};
+  \node[align=left,anchor=west,font=\small] at (6.4,0.5) {Suelto: el pull-up lleva el pin a 3.3 V \(\rightarrow\) \texttt{HIGH}};
+  \node[align=left,anchor=west,font=\small] at (6.4,-0.5) {Presionado: el botón lo une a GND \(\rightarrow\) \texttt{LOW}};
+\end{tikzpicture}
+\end{center}
+
+Por eso en el código ``presionado'' es \texttt{LOW}: la lógica está invertida respecto a
+lo intuitivo.
+
+\subsection{Rebote mecánico (\emph{debounce})}
+
+Un botón físico no cambia de estado limpiamente: durante unos milisegundos sus contactos
+metálicos rebotan y el pin alterna rápido entre \texttt{HIGH} y \texttt{LOW}.
+
+\begin{center}
+\begin{tikzpicture}[font=\small,thick,xscale=1.1]
+  \draw[->,gray] (0,0) -- (10,0) node[right,black] {tiempo};
+  \draw[cBoton,line width=1.2pt] (0,1) -- (2,1) -- (2,0) -- (2.2,0) -- (2.2,1) -- (2.35,1) -- (2.35,0) -- (2.6,0) -- (2.6,1) -- (2.7,1) -- (2.7,0) -- (6,0) -- (6,1) -- (6.15,1) -- (6.15,0) -- (6.3,0) -- (6.3,1) -- (10,1);
+  \node[left] at (0,1) {\texttt{HIGH}};
+  \node[left] at (0,0) {\texttt{LOW}};
+  \draw[decorate,decoration={brace,amplitude=4pt}] (2,1.2) -- node[above=4pt]{\scriptsize rebotes ($<$ 50 ms)} (2.75,1.2);
+  \node[cBoton] at (4.4,0.5) {\scriptsize presionado};
+\end{tikzpicture}
+\end{center}
+
+Sin tratamiento, una sola pulsación se leería como varias (y activaría y cancelaría la
+alerta en el mismo instante). La solución, llamada \textbf{debounce}, es aceptar un cambio
+solo cuando la lectura lleva más de 50 ms estable.
+
+\begin{analogia}[debounce]
+Es el mismo concepto que el \emph{debounce} de eventos en una interfaz web: ignorar
+ráfagas de eventos y reaccionar solo cuando la señal se estabiliza.
+\end{analogia}
+
+\subsection{I2C: el bus de comunicación del acelerómetro}
+
+El acelerómetro no entrega un voltaje simple: es un chip con su propio procesador y
+registros internos. Se comunica por \textbf{I2C}, un bus serial de dos cables:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{SDA} (\emph{Serial Data}): por donde viajan los datos, bit a bit.
+  \item \textbf{SCL} (\emph{Serial Clock}): una señal de reloj que marca cuándo leer cada bit.
+\end{itemize}
+
+Cada chip en el bus tiene una dirección; la del MPU6050 es \texttt{0x68}. Leer la
+aceleración consiste en pedirle al chip el contenido de unos registros (posiciones de
+memoria) a partir de la dirección \texttt{0x3B}.
+
+\begin{analogia}[I2C]
+Es parecido a un protocolo petición-respuesta sobre un bus compartido: la ESP32 actúa
+como cliente, el sensor como servidor con dirección fija, y los ``registros'' son como
+\emph{endpoints} de lectura y escritura. Si un cable está flojo, el resultado es el
+equivalente a un \emph{timeout} o una respuesta corrupta.
+\end{analogia}
+
+\subsection{Aceleración en ``g''}
+
+El acelerómetro mide aceleración en los ejes $x$, $y$, $z$. La unidad práctica es la
+\textbf{g}, la aceleración de la gravedad (9.8 m/s$^2$). El programa calcula la magnitud
+total:
+\[
+  |a| = \sqrt{a_x^2 + a_y^2 + a_z^2}
+\]
+
+\begin{center}
+\begin{tabular}{@{}cl@{}}
+\toprule
+\textbf{Valor} & \textbf{Situación}\\
+\midrule
+$\approx 1$ g & Quieto (solo se siente la gravedad), sin importar la orientación\\
+$\approx 0$ g & Cayendo libremente (en caída libre no se siente peso)\\
+$> 2$ g & Golpe fuerte (el cuerpo se frena de golpe al tocar el suelo)\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%=====================================================================
+\section{Hardware y conexiones}
+%=====================================================================
+
+\subsection{Componentes}
+
+\begin{center}
+\begin{tabular}{@{}l p{10.2cm}@{}}
+\toprule
+\textbf{Componente} & \textbf{Función}\\
+\midrule
+ESP32-S3 DevKitC-1 & Microcontrolador con WiFi. Ejecuta el firmware.\\
+Pulsador (botón) & Botón de pánico y botón para cancelar.\\
+LED + resistencia 220 $\Omega$ & Indicador de estado. La resistencia limita la corriente para no quemar el LED.\\
+XD-58C & Sensor óptico de pulso: un LED verde ilumina la piel y un fotosensor mide cuánta luz vuelve; cambia con cada latido. Entrega un voltaje analógico.\\
+MPU6050 (módulo GY-521) & Acelerómetro y giroscopio de 3 ejes. Se usa solo el acelerómetro.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Tabla de conexiones}
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Componente} & \textbf{Pin del componente} & \textbf{Pin de la ESP32} & \textbf{Tipo de señal}\\
+\midrule
+\color{cBoton}Botón & una pata & GPIO4 & entrada digital (pull-up)\\
+ & pata opuesta (diagonal) & GND & \\
+\color{cLed!80!black}LED & ánodo (pata larga) vía 220 $\Omega$ & GPIO2 & salida digital\\
+ & cátodo (pata corta) & GND & \\
+\color{cPulso}XD-58C & S (señal) & GPIO5 & entrada analógica (ADC)\\
+ & + & 3V3 & alimentación\\
+ & $-$ & GND & \\
+\color{cCaida}MPU6050 & SDA & GPIO8 & bus I2C (datos)\\
+ & SCL & GPIO9 & bus I2C (reloj)\\
+ & VCC & 3V3 & alimentación\\
+ & GND & GND & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tikzpicture}[font=\small,thick]
+  \node[draw=cEsp,fill=cEsp!10,rounded corners=6pt,minimum width=3.2cm,minimum height=6cm,line width=1pt] (esp) at (0,0) {};
+  \node[cEsp!80!black,font=\bfseries] at (0,2.6) {ESP32-S3};
+  \foreach \y/\t in {2/GPIO4, 1.2/GPIO2, 0.4/GPIO5, -0.4/GPIO8, -1.2/GPIO9, -2/3V3, -2.6/GND} {
+    \node[anchor=east,font=\scriptsize\ttfamily] at (1.55,\y) {\t};
+    \fill (1.6,\y) circle (2pt);
+  }
+  % Botón
+  \draw[cBoton,line width=1.4pt] (1.6,2) -- (4,2);
+  \node[draw=cBoton,fill=cBoton!12,rounded corners,minimum width=2.6cm] at (5.4,2) {Botón $\rightarrow$ GND};
+  % LED
+  \draw[cLed!80!black,line width=1.4pt] (1.6,1.2) -- (4,1.2);
+  \node[draw=cLed,fill=cLed!15,rounded corners,minimum width=2.6cm] at (5.4,1.2) {220 $\Omega$ + LED $\rightarrow$ GND};
+  % Pulso
+  \draw[cPulso,line width=1.4pt] (1.6,0.4) -- (4,0.4);
+  \node[draw=cPulso,fill=cPulso!12,rounded corners,minimum width=2.6cm] at (5.4,0.4) {XD-58C (S)};
+  % MPU
+  \draw[cCaida,line width=1.4pt] (1.6,-0.4) -- (4,-0.4);
+  \draw[cCaida,line width=1.4pt,dashed] (1.6,-1.2) -- (4,-1.2);
+  \node[draw=cCaida,fill=cCaida!12,rounded corners,minimum width=2.6cm,minimum height=1.2cm,align=center] at (5.4,-0.8) {MPU6050\\\scriptsize SDA (—) y SCL (- -)};
+  % Alimentación
+  \draw[c3v3,line width=1.4pt] (1.6,-2) -- (8,-2) node[right] {riel + (3V3): XD-58C y MPU6050};
+  \draw[cGnd,line width=1.4pt] (1.6,-2.6) -- (8,-2.6) node[right] {riel $-$ (GND): todos};
+\end{tikzpicture}
+\end{center}
+
+\begin{ojo}[Cuidado con el voltaje]
+Los sensores se alimentan con 3V3, nunca con 5 V. Los pines de la ESP32 toleran como
+máximo 3.3 V; si el sensor de pulso se alimenta con 5 V, su salida puede superar ese
+límite y dañar el pin.
+\end{ojo}
+
+\begin{ojo}[Conexiones flojas]
+El bus I2C y la señal analógica son sensibles a contactos intermitentes. Con pines sin
+soldar aparecen errores de lectura del acelerómetro y ruido en el pulso. El firmware
+tolera estas fallas (sección~\ref{sec:robustez}), pero la solución definitiva es soldar
+los pines.
+\end{ojo}
+
+%=====================================================================
+\section{Lógica del sistema}
+%=====================================================================
+
+\subsection{Máquina de estados}
+
+El firmware tiene dos estados. La lectura de los sensores y el envío de alertas ocurren
+\textbf{en ambos estados}, en cada iteración del ciclo principal.
+
+\begin{center}
+\begin{tikzpicture}[->,>={Stealth[length=3mm]},node distance=6.5cm,thick,
+  every state/.style={minimum size=2.6cm,align=center,line width=1.2pt}]
+  \node[state,initial,initial text={arranque},draw=cEsp,fill=cEsp!10] (E) {\textbf{ESTABLE}\\\scriptsize vigilando\\\scriptsize LED titila};
+  \node[state,right of=E,draw=cPulso,fill=cPulso!10] (P) {\textbf{PENDIENTE}\\\scriptsize contando 30 s\\\scriptsize LED fijo};
+  \path (E) edge[bend left=28] node[above=3pt,align=center,font=\small] {\chip{cBoton}{BOTON} o \chip{cPulso}{RITMO} o \chip{cCaida}{CAIDA}} (P)
+        (P) edge[bend left=28] node[below,font=\small] {botón (cancelar)} (E)
+        (P) edge[bend left=55,looseness=1] node[below,font=\small,align=center] {pasan 30 s:\\ alerta a la cola de envío} (E)
+        (P) edge[loop right] node[right,font=\small,align=center] {otra causa:\\se suma} (P);
+\end{tikzpicture}
+\end{center}
+
+\begin{center}
+\begin{tabular}{@{}l p{10.6cm}@{}}
+\toprule
+\textbf{Transición} & \textbf{Comportamiento}\\
+\midrule
+ESTABLE $\rightarrow$ PENDIENTE & Ocurre una o varias causas en la misma iteración. Se guardan como un conjunto de \emph{flags} y empieza el conteo de 30 s.\\
+PENDIENTE $\rightarrow$ PENDIENTE & Ocurre otra causa durante el conteo: se agrega al conjunto (por ejemplo \texttt{RITMO+CAIDA}). El conteo no se reinicia.\\
+PENDIENTE $\rightarrow$ ESTABLE & El botón cancela: no se envía nada.\\
+PENDIENTE $\rightarrow$ ESTABLE & Se cumplen los 30 s: la alerta pasa a la cola de envío y el sistema vuelve a vigilar inmediatamente.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Indicador LED}
+
+El LED comunica el estado sin necesidad de un computador:
+
+\begin{center}
+\begin{tikzpicture}[font=\small,x=0.42cm,y=0.5cm]
+  % fila de tiempo: 1 celda = 0.5 s
+  \def\onC{cLed}
+  \foreach \i in {0,...,7} { \pgfmathparse{mod(\i,2)==0 ? 1 : 0}\ifnum\pgfmathresult=1 \fill[cLed] (\i,0) rectangle ++(1,1); \else \fill[gray!20] (\i,0) rectangle ++(1,1); \fi }
+  \fill[cLed] (8,0) rectangle (20,1);
+  \fill[gray!20] (20,0) rectangle (22,1);
+  \foreach \i in {22,...,29} { \pgfmathparse{mod(\i,2)==0 ? 1 : 0}\ifnum\pgfmathresult=1 \fill[cLed] (\i,0) rectangle ++(1,1); \else \fill[gray!20] (\i,0) rectangle ++(1,1); \fi }
+  \draw (0,0) grid (30,1);
+  \draw[decorate,decoration={brace,amplitude=4pt}] (0,1.2) -- node[above=4pt]{vigilando: titila} (8,1.2);
+  \draw[decorate,decoration={brace,amplitude=4pt}] (8,1.2) -- node[above=4pt]{contando 30 s: fijo} (20,1.2);
+  \draw[decorate,decoration={brace,amplitude=4pt}] (22,1.2) -- node[above=4pt]{vigilando de nuevo: titila} (30,1.2);
+  \draw[->,cPulso,thick] (8,-0.9) node[below,font=\scriptsize]{detecta algo} -- (8,-0.1);
+  \draw[->,cPC,thick] (21,-0.9) node[below,font=\scriptsize,align=center]{se envía:\\LED apagado 1 s} -- (21,-0.1);
+\end{tikzpicture}
+\end{center}
+
+\begin{center}
+\begin{tabular}{@{}l p{9.4cm}@{}}
+\toprule
+\textbf{LED} & \textbf{Significado}\\
+\midrule
+Titila (cada 0.5 s) & Vigilando, sin eventos\\
+Fijo & Contando los 30 s; se puede cancelar con el botón\\
+Apagado 1 s & Se acaba de enviar una alerta\\
+Parpadeo durante el arranque & Conectándose al WiFi (fijo 2 s = conectado; parpadeo rápido = falló)\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Ciclo de vida de una alerta}
+
+\begin{center}
+\begin{tikzpicture}[font=\small,node distance=0.55cm,
+  paso/.style={draw,rounded corners=4pt,minimum width=9.5cm,align=center,inner sep=6pt,line width=0.8pt},
+  flecha/.style={-{Stealth[length=2.5mm]},thick}]
+  \node[paso,draw=cCaida,fill=cCaida!10] (s1) {Un sensor detecta un evento (por ejemplo, una caída)};
+  \node[paso,draw=cPulso,fill=cPulso!10,below=of s1] (s2) {Estado PENDIENTE: LED fijo, empieza el conteo de 30 s};
+  \node[paso,draw=cPulso,fill=cPulso!5,below=of s2] (s3) {Durante el conteo, otros eventos se suman a la misma alerta};
+  \node[paso,draw=cBoton,fill=cBoton!10,below left=0.6cm and -3.2cm of s3,minimum width=4.4cm] (c) {Botón: se cancela\\\scriptsize vuelve a vigilar, no se envía};
+  \node[paso,draw=cEsp,fill=cEsp!10,below right=0.6cm and -3.2cm of s3,minimum width=4.4cm] (q) {30 s sin cancelar:\\\scriptsize la alerta entra a la cola};
+  \node[paso,draw=cPC,fill=cPC!10,below=2.7cm of s3] (s5) {Envío en segundo plano: HTTP POST al computador\\\scriptsize reintenta cada 3 s, máximo 5 intentos};
+  \node[paso,draw=cEsp,fill=cEsp!5,below=of s5] (s6) {Mientras tanto el sistema ya volvió a ESTABLE y sigue vigilando};
+  \draw[flecha] (s1) -- (s2);
+  \draw[flecha] (s2) -- (s3);
+  \draw[flecha] (s3.south) -- (c.north);
+  \draw[flecha] (s3.south) -- (q.north);
+  \draw[flecha] (q.south) -- (q.south |- s5.north);
+  \draw[flecha] (s5) -- (s6);
+\end{tikzpicture}
+\end{center}
+
+\paragraph{Ejemplo.} El pulso sube a 120 BPM: se abre un conteo por \chip{cPulso}{RITMO}.
+A los 10 s la persona se cae: la alerta pasa a ser \texttt{RITMO+CAIDA}. Al cumplirse
+los 30 s se envía esa alerta combinada. Si minutos después ocurre otra caída, se abre un
+conteo nuevo y se envía otra alerta, esta vez solo \chip{cCaida}{CAIDA}.
+
+%=====================================================================
+\section{Los sensores en detalle}
+%=====================================================================
+
+\subsection{Sensor de pulso XD-58C}
+
+\paragraph{Principio físico.} El sensor ilumina la piel con un LED verde y mide la luz
+reflejada. Con cada latido entra más sangre a los capilares, que absorbe más luz. El
+resultado es un voltaje que sube y baja al ritmo del corazón, alrededor de un valor
+central de unos 1.65 V (lectura de ADC $\approx$ 2048).
+
+\begin{center}
+\begin{tikzpicture}[font=\small,x=1.2cm,y=1.6cm]
+  \draw[->,gray] (0,0) -- (10.3,0) node[right,black] {tiempo};
+  \draw[->,gray] (0,0) -- (0,2.3) node[above,black] {lectura ADC};
+  % onda
+  \draw[cPulso,line width=1.3pt,smooth] plot coordinates {
+    (0,0.9) (0.3,0.9) (0.5,1.9) (0.7,1.1) (0.9,1.25) (1.1,0.95) (1.5,0.9) (2.3,0.9)
+    (2.5,1.95) (2.7,1.1) (2.9,1.25) (3.1,0.95) (3.5,0.9) (4.3,0.9)
+    (4.5,1.9) (4.7,1.1) (4.9,1.25) (5.1,0.95) (5.5,0.9) (6.3,0.9)
+    (6.5,1.95) (6.7,1.1) (6.9,1.25) (7.1,0.95) (7.5,0.9) (8.3,0.9)
+    (8.5,1.9) (8.7,1.1) (8.9,1.25) (9.1,0.95) (9.5,0.9) (10,0.9)};
+  \draw[dashed,cEsp] (0,1.05) -- (10,1.05) node[right,font=\scriptsize] {línea base};
+  \draw[dashed,cCaida] (0,1.45) -- (10,1.45) node[right,font=\scriptsize] {umbral de latido};
+  \foreach \x in {0.42,2.42,4.42,6.42,8.42} \fill[cCaida] (\x,1.45) circle (2.2pt);
+  \draw[<->,thick] (2.42,2.15) -- node[above]{\scriptsize IBI (ms entre latidos)} (4.42,2.15);
+\end{tikzpicture}
+\end{center}
+
+\paragraph{Algoritmo.} Cada 10 ms se toma una muestra y se actualizan dos promedios
+móviles exponenciales:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{línea base}: el valor promedio de la señal (se adapta lentamente);
+  \item \textbf{amplitud}: el tamaño típico de la oscilación alrededor de la base.
+\end{itemize}
+Un \textbf{latido} se registra cuando la señal cruza hacia arriba el umbral
+$\text{base} + 0.5 \cdot \text{amplitud}$, con un período refractario de 300 ms (no se
+aceptan dos latidos más juntos que eso). El tiempo entre dos latidos se llama
+\textbf{IBI} (\emph{inter-beat interval}). Con los últimos cinco IBI:
+\[
+  \text{BPM} = \frac{60\,000 \cdot 5}{\sum_{i=1}^{5} \text{IBI}_i}
+\]
+
+\paragraph{Disparo.} El ritmo dispara cuando el BPM llega a \texttt{UMBRAL\_BPM}
+(110). Para no disparar en bucle mientras el pulso sigue alto, el disparo se
+\emph{desarma} y solo se \emph{rearma} cuando el pulso baja de 105 BPM (histéresis).
+
+\begin{analogia}[histéresis]
+Es como un \emph{rate limiter} con condición de reinicio: después de emitir el evento
+no se vuelve a emitir hasta que la condición se haya apagado claramente, lo que evita
+oscilaciones cuando el valor ronda el umbral.
+\end{analogia}
+
+\paragraph{Filtros anti-ruido (configurables).} Si el sensor está mal conectado, el pin
+analógico queda flotando y el ruido eléctrico puede parecer latidos. El firmware tiene
+filtros que se activan o desactivan desde \texttt{config.h}. En la configuración actual
+están \textbf{desactivados}, para que el sensor siempre entregue una lectura durante
+las pruebas con pines sin soldar.
+
+\begin{center}
+\begin{tabular}{@{}l p{5.6cm} c c@{}}
+\toprule
+\textbf{Filtro} & \textbf{Qué hace} & \textbf{Actual} & \textbf{Recomendado}\\
+\midrule
+\texttt{PULSO\_BASE\_MIN/MAX} & Descarta la señal si el promedio está pegado arriba o abajo (sensor sin alimentación) & 0 / 4096 & 300 / 3800\\
+\texttt{PULSO\_REGULARIDAD} & Descarta si el IBI más largo supera en más de este factor al más corto (latidos disparejos = ruido) & 100 & 1.3\\
+\texttt{IBI\_MIN/MAX\_MS} & Rango fisiológico aceptado & 300 / 2000 & 333 / 1500\\
+\texttt{RITMO\_CONFIRMA\_MS} & Tiempo que el pulso debe sostenerse alto antes de disparar & 0 & 5000\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Acelerómetro MPU6050: detección de caídas}
+
+Una caída tiene una firma característica en la magnitud de la aceleración: primero un
+tramo de \textbf{caída libre} (la lectura baja hacia 0 g) y, poco después, un
+\textbf{impacto} (un pico por encima de 2 g).
+
+\begin{center}
+\begin{tikzpicture}[font=\small,x=1.15cm,y=1.1cm]
+  \fill[cCaida!10] (2.9,0) rectangle (5.3,3.6);
+  \node[cCaida!70!black,font=\scriptsize,below] at (4.1,0) {ventana de 1 s};
+  \draw[->,gray] (0,0) -- (10.3,0) node[right,black] {tiempo};
+  \draw[->,gray] (0,0) -- (0,3.7) node[above,black] {$|a|$ (g)};
+  \foreach \y in {1,2,3} \node[left,font=\scriptsize] at (0,\y) {\y};
+  \draw[dashed,cEsp] (0,0.6) -- (10,0.6) node[right,font=\scriptsize] {0.6 g: caída libre};
+  \draw[dashed,cPulso] (0,2) -- (10,2) node[right,font=\scriptsize] {2.0 g: impacto};
+  \draw[cCaida,line width=1.3pt] plot[smooth] coordinates {(0,1) (2.5,1.02) (2.8,0.9) (3,0.3) (3.6,0.15) (4.2,0.2) (4.4,3.2) (4.6,0.6) (4.9,1.4) (5.3,0.9) (6,1.05) (10,1)};
+  \fill[cEsp] (3,0.3) circle (2.5pt);
+  \fill[cPulso] (4.4,3.2) circle (2.5pt);
+  \node[right,font=\scriptsize,align=left] at (5.4,3.0) {$\leftarrow$ CAIDA detectada};
+  \node[below,font=\scriptsize] at (1.3,0.95) {quieto (1 g)};
+\end{tikzpicture}
+\end{center}
+
+\paragraph{Algoritmo.} Cada 10 ms se lee la aceleración por I2C y se calcula $|a|$.
+\begin{enumerate}[leftmargin=*]
+  \item Si $|a| <$ \texttt{CAIDA\_LIBRE\_G} (0.6 g), se marca el inicio de una posible caída.
+  \item Si dentro de los siguientes \texttt{VENTANA\_IMPACTO\_MS} (1 s) aparece
+        $|a| >$ \texttt{IMPACTO\_G} (2.0 g), se reporta una caída.
+  \item Si pasa 1 s sin impacto, se descarta (era solo un movimiento brusco).
+\end{enumerate}
+
+El sensor se configura en el rango de $\pm 8$ g, en el que cada g equivale a 4096
+unidades del valor crudo de 16 bits.
+
+\subsection{Robustez ante conexiones defectuosas}\label{sec:robustez}
+
+\begin{center}
+\begin{tabular}{@{}p{4.6cm} p{11cm}@{}}
+\toprule
+\textbf{Situación} & \textbf{Respuesta del firmware}\\
+\midrule
+MPU6050 no responde al arrancar & Se intenta encontrar de nuevo cada 5 s.\\
+Lecturas I2C fallidas & Se descartan y se reinicia la detección de caída libre (una lectura mala no puede formar parte de una caída).\\
+Lectura con los tres ejes en cero & Se trata como basura (físicamente imposible salvo error de bus).\\
+20 fallas seguidas & Se marca el sensor como perdido y se vuelve a buscar.\\
+Errores internos del core de Arduino & Se silencian con \texttt{CORE\_DEBUG\_LEVEL=0} para no inundar el monitor.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%=====================================================================
+\section{Comunicación con el computador}
+%=====================================================================
+
+\subsection{Protocolo}
+
+La ESP32 se conecta a la red WiFi como cliente (modo \emph{station}) y envía cada
+evento como un \texttt{HTTP POST} a \texttt{http://<IP del PC>:5000/alerta}, con un cuerpo JSON:
+
+\begin{lstlisting}[numbers=none,language={}]
+{"dispositivo":"ESP32-S3","evento":"ALERTA","ip":"192.168.5.110",
+ "mac":"E0:72:A1:AA:20:84","causa":"RITMO+CAIDA"}
+\end{lstlisting}
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Campo} & \textbf{Contenido}\\
+\midrule
+\texttt{evento} & \texttt{CONECTADA} (al arrancar) o \texttt{ALERTA}\\
+\texttt{causa} & Solo en alertas: \texttt{BOTON}, \texttt{RITMO}, \texttt{CAIDA} o combinaciones con \texttt{+}\\
+\texttt{ip} & Dirección IP de la placa en la red local\\
+\texttt{mac} & Identificador de hardware único de la placa\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+El servidor responde \texttt{200 OK}; ese código es la confirmación de entrega que usa
+la placa para decidir si reintenta.
+
+\subsection{Cola de envíos}
+
+El envío no bloquea la vigilancia. Al terminar un conteo, la alerta se agrega a una cola
+(máximo 5 elementos) y el sistema vuelve a ESTABLE de inmediato. En cada iteración del
+ciclo principal se intenta enviar el primer elemento:
+
+\begin{center}
+\begin{tikzpicture}[font=\small,
+  caja/.style={draw,minimum width=2.2cm,minimum height=0.8cm,align=center,line width=0.8pt},
+  flecha/.style={-{Stealth[length=2.5mm]},thick}]
+  \node[caja,draw=cPulso,fill=cPulso!12] (a1) at (0,0) {\scriptsize RITMO+CAIDA};
+  \node[caja,draw=cCaida,fill=cCaida!12] (a2) at (2.3,0) {\scriptsize CAIDA};
+  \node[caja,draw=gray,fill=gray!8] (a3) at (4.6,0) {\scriptsize (vacío)};
+  \node[above=2pt of a2,font=\scriptsize] {cola};
+  \node[draw=cPC,fill=cPC!10,rounded corners,minimum width=2.6cm,minimum height=1cm,align=center] (pc) at (-4,0) {Computador};
+  \draw[flecha,cPC] (a1.west) -- node[above,font=\scriptsize]{POST} (pc.east);
+  \node[align=left,font=\scriptsize,anchor=north west] at (-5.3,-0.9) {
+    \textbf{200 OK} $\rightarrow$ se saca de la cola\\
+    \textbf{falla} $\rightarrow$ reintenta cada 3 s; tras 5 intentos se descarta y se informa en el monitor};
+\end{tikzpicture}
+\end{center}
+
+Cada intento tiene un límite de 2 s (\texttt{setConnectTimeout}, \texttt{setTimeout}),
+de modo que un computador caído no detiene la lectura de los sensores por mucho tiempo.
+
+\subsection{Servidor en el computador}
+
+\texttt{servidor\_pc.py} usa solo la biblioteca estándar de Python:
+\begin{itemize}[leftmargin=*]
+  \item \texttt{ThreadingHTTPServer}: atiende cada petición en un hilo propio, así una
+        conexión lenta no bloquea a las demás.
+  \item \texttt{timeout = 5}: libera conexiones que quedaron abiertas a medias (por
+        ejemplo, si el WiFi de la placa se cortó durante un envío).
+  \item Responde con \texttt{Content-Length} y \texttt{Connection: close} explícitos,
+        para que la placa sepa exactamente cuándo terminó la respuesta.
+  \item Muestra en consola una línea para \texttt{CONECTADA} y un recuadro destacado
+        (con pitido) para cada \texttt{ALERTA}.
+\end{itemize}
+
+%=====================================================================
+\section{Estructura del firmware}
+%=====================================================================
+
+\subsection{Organización del repositorio}
+
+\begin{lstlisting}[numbers=none,language={}]
+alerta-esp32s3/
+|-- platformio.ini          configuración de compilación (placa, puerto, flags)
+|-- src/main.cpp            firmware
+|-- include/config.h        pines, tiempos y umbrales (todo lo ajustable)
+|-- include/secrets.h       WiFi y URL del PC (no se sube al repositorio)
+|-- pc/servidor_pc.py       servidor que recibe las alertas
+`-- docs/                   documentación
+\end{lstlisting}
+
+\subsection{Modelo de ejecución}
+
+El framework de Arduino ejecuta \texttt{setup()} una vez y luego llama a \texttt{loop()}
+indefinidamente. No hay hilos ni interrupciones: todo es \textbf{cooperativo y no
+bloqueante}. Ninguna función espera con \texttt{delay()} durante la operación normal;
+los tiempos se controlan comparando con \texttt{millis()} (milisegundos desde el
+arranque).
+
+\begin{analogia}[millis()]
+Es un \emph{event loop} de un solo hilo, como el de Node.js: cada tarea revisa
+``¿ya pasó mi tiempo?'' y devuelve el control rápido. Un \texttt{delay(30000)} sería
+equivalente a un \texttt{sleep} síncrono que congela todo el sistema.
+\end{analogia}
+
+\subsection{Una iteración de \texttt{loop()}}
+
+\begin{center}
+\begin{tikzpicture}[font=\small,node distance=0.35cm,
+  f/.style={draw,rounded corners=3pt,minimum width=11cm,align=left,inner sep=5pt,text width=10.6cm,line width=0.7pt},
+  flecha/.style={-{Stealth[length=2mm]},thick}]
+  \node[f,draw=cBoton,fill=cBoton!8] (1) {\texttt{botonPresionado()} — lee el botón con debounce};
+  \node[f,draw=cPulso,fill=cPulso!8,below=of 1] (2) {\texttt{actualizarPulso()} — muestra el ADC cada 10 ms y recalcula BPM};
+  \node[f,draw=cCaida,fill=cCaida!8,below=of 2] (3) {\texttt{detectarCaida()} — lee el MPU6050 cada 10 ms y busca la firma de caída};
+  \node[f,draw=gray,fill=gray!6,below=of 3] (4) {Reintento de búsqueda del MPU6050 (cada 5 s) y reporte al monitor (cada 2 s)};
+  \node[f,draw=cEsp,fill=cEsp!8,below=of 4] (5) {\texttt{switch (estado)} — transiciones de la máquina de estados};
+  \node[f,draw=cLed,fill=cLed!12,below=of 5] (6) {\texttt{actualizarLed()} — titila, fijo o apagado según el estado};
+  \node[f,draw=cPC,fill=cPC!8,below=of 6] (7) {\texttt{atenderEnvios()} — un intento de envío del primer elemento de la cola};
+  \foreach \a/\b in {1/2,2/3,3/4,4/5,5/6,6/7} \draw[flecha] (\a) -- (\b);
+  \draw[flecha] (7.east) -- ++(0.6,0) |- node[pos=0.25,right,font=\scriptsize]{siguiente iteración} (1.east);
+\end{tikzpicture}
+\end{center}
+
+\subsection{Mapa de funciones de \texttt{main.cpp}}
+
+\begin{center}
+\begin{tabular}{@{}p{4.4cm} p{11.2cm}@{}}
+\toprule
+\textbf{Función} & \textbf{Responsabilidad}\\
+\midrule
+\texttt{actualizarLed()} & Traduce el estado a un patrón del LED.\\
+\texttt{textoCausas(m)} & Convierte el conjunto de \emph{flags} (\texttt{C\_BOTON=1}, \texttt{C\_RITMO=2}, \texttt{C\_CAIDA=4}) en texto: \texttt{"RITMO+CAIDA"}.\\
+\texttt{botonPresionado()} & Devuelve \texttt{true} solo en el flanco de bajada (el instante de presionar), ya filtrado.\\
+\texttt{actualizarPulso()} & Muestreo del ADC, base y amplitud, detección de latidos, cálculo de BPM y filtros.\\
+\texttt{ritmoAlto()} & Decide si el pulso dispara, con confirmación temporal e histéresis.\\
+\texttt{iniciarMPU()} & Despierta el sensor (registro \texttt{0x6B}) y fija el rango $\pm 8$ g (registro \texttt{0x1C}).\\
+\texttt{leerAceleracionG()} & Lee 6 bytes desde el registro \texttt{0x3B} y devuelve $|a|$ en g, o $-1$ si la lectura falla.\\
+\texttt{detectarCaida()} & Detección de caída libre + impacto, y tolerancia a fallos del bus.\\
+\texttt{iniciarConteo()}\newline\texttt{agregarCausa()} & Entrada a PENDIENTE y suma de causas durante el conteo.\\
+\texttt{conectarWiFi()} & Reconexión con límite de 15 s.\\
+\texttt{enviarEvento()} & Arma el JSON y hace el POST; devuelve \texttt{true} solo con 200.\\
+\texttt{encolarAlerta()}\newline\texttt{atenderEnvios()} & Cola de envíos con reintentos acotados.\\
+\texttt{conectarWiFiConLed()} & Conexión inicial con indicación por LED.\\
+\texttt{setup()} & Configuración de pines, sensor, WiFi y aviso \texttt{CONECTADA}.\\
+\texttt{loop()} & Ciclo principal descrito arriba.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Fragmentos clave}
+
+\noindent\textbf{Suma de causas con \emph{bit flags}.} Cada causa es un bit; un conjunto de
+causas es un OR de bits. Detectar varias a la vez es natural:\par
+
+\begin{lstlisting}[language=C++,numbers=none]
+const uint8_t C_BOTON = 1, C_RITMO = 2, C_CAIDA = 4;   // 001, 010, 100
+uint8_t nuevas = 0;
+if (presion)     nuevas |= C_BOTON;
+if (caida)       nuevas |= C_CAIDA;
+if (ritmoAlto()) nuevas |= C_RITMO;
+if (nuevas) iniciarConteo(nuevas);                     // p. ej. 110 = RITMO+CAIDA
+\end{lstlisting}
+
+\noindent\textbf{Fin del conteo: encolar y volver a vigilar.}\par
+
+\begin{lstlisting}[language=C++,numbers=none]
+if (estado == PENDIENTE && millis() - tInicioAlerta >= VENTANA_MS) {
+  encolarAlerta(causas);                         // el envío ocurre en atenderEnvios()
+  tLedApagadoHasta = millis() + LED_APAGADO_MS;  // LED apagado 1 s
+  estado = ESTABLE;                              // sigue vigilando de inmediato
+}
+\end{lstlisting}
+
+\noindent\textbf{Reintentos acotados.}\par
+
+\begin{lstlisting}[language=C++,numbers=none]
+void atenderEnvios() {
+  if (nCola == 0) return;
+  if (intentos > 0 && millis() - tUltimoIntento < REINTENTO_MS) return;
+  tUltimoIntento = millis();
+  intentos++;
+  bool ok = enviarEvento("ALERTA", textoCausas(cola[0]).c_str());
+  if (ok || intentos >= MAX_INTENTOS) {   // entregado, o se rinde tras 5 intentos
+    /* sacar cola[0] de la cola */
+    intentos = 0;
+  }
+}
+\end{lstlisting}
+
+%=====================================================================
+\section{Parámetros configurables}
+%=====================================================================
+
+Todo lo ajustable está en \texttt{include/config.h}. Un cambio requiere volver a
+compilar y cargar el firmware.
+
+\begin{center}
+\begin{tabular}{@{}l c p{8.3cm}@{}}
+\toprule
+\textbf{Parámetro} & \textbf{Valor} & \textbf{Efecto}\\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Tiempos}}\\
+\texttt{VENTANA\_MS} & 30000 & Duración del conteo para cancelar\\
+\texttt{DEBOUNCE\_MS} & 50 & Estabilidad exigida al botón\\
+\texttt{LED\_TITILEO\_MS} & 500 & Período de medio ciclo del titileo\\
+\texttt{LED\_APAGADO\_MS} & 1000 & LED apagado tras enviar una alerta\\
+\texttt{REINTENTO\_MS} & 3000 & Espera entre reintentos de envío\\
+\texttt{MAX\_INTENTOS} & 5 & Intentos por alerta antes de descartarla\\
+\texttt{MUESTREO\_MS} & 10 & Período de muestreo de los sensores (100 Hz)\\
+\multicolumn{3}{@{}l}{\textit{Pulso}}\\
+\texttt{UMBRAL\_BPM} & 110 & Pulso que dispara la alerta\\
+\texttt{PULSO\_AMPLITUD\_MIN} & 25 & Amplitud mínima para considerar que hay señal\\
+(filtros) & — & Ver la tabla de filtros anti-ruido en la sección de pulso\\
+\multicolumn{3}{@{}l}{\textit{Caídas}}\\
+\texttt{CAIDA\_LIBRE\_G} & 0.6 & Debajo de este valor se considera caída libre\\
+\texttt{IMPACTO\_G} & 2.0 & Encima de este valor se considera impacto. Subirlo si hay falsos positivos; bajarlo si no detecta caídas\\
+\texttt{VENTANA\_IMPACTO\_MS} & 1000 & Tiempo máximo entre caída libre e impacto\\
+\multicolumn{3}{@{}l}{\textit{Pines}}\\
+\texttt{PIN\_BOTON}, \texttt{PIN\_LED} & 4, 2 & Botón y LED\\
+\texttt{PIN\_PULSO} & 5 & Señal del XD-58C (debe ser un pin con ADC1)\\
+\texttt{PIN\_SDA}, \texttt{PIN\_SCL} & 8, 9 & Bus I2C del MPU6050\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{nota}[Por qué el pulso usa un pin de ADC1]
+La ESP32 tiene dos convertidores analógicos, ADC1 y ADC2. El ADC2 lo usa internamente el
+WiFi, así que mientras el WiFi está activo sus pines no se pueden leer. GPIO5 pertenece
+al ADC1 y funciona siempre.
+\end{nota}
+
+%=====================================================================
+\section{Operación y diagnóstico}
+%=====================================================================
+
+\subsection{Puesta en marcha}
+
+\begin{enumerate}[leftmargin=*]
+  \item En el computador: \texttt{python pc/servidor\_pc.py}. Muestra la URL en la que escucha.
+  \item Poner esa URL en \texttt{PC\_URL} de \texttt{include/secrets.h}, junto con la red y la clave del WiFi (solo redes de 2.4 GHz).
+  \item Compilar y cargar con PlatformIO (VS Code $\rightarrow$ \emph{Upload}).
+  \item Abrir el monitor serial (\emph{Monitor}) para ver el diagnóstico.
+\end{enumerate}
+
+\subsection{Mensajes del monitor serial}
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{7.3cm} >{\raggedright\arraybackslash}p{7.6cm}@{}}
+\toprule
+\textbf{Mensaje} & \textbf{Significado}\\
+\midrule
+\texttt{MPU6050 OK} / \texttt{no encontrado} & Resultado de la detección del acelerómetro al arrancar\\
+\texttt{Pulso: 76 BPM | Acel: min 1.00 g, max 1.02 g} & Reporte periódico (cada 2 s) de ambos sensores\\
+\texttt{Pulso: sin lectura} & Señal plana: no hay dedo o el sensor no está conectado\\
+\texttt{Caída detectada (golpe de 3.1 g)} & Se detectó la firma de caída\\
+\texttt{Estado: ALERTA por CAIDA ...} & Comenzó un conteo de 30 s\\
+\texttt{Se suma otra causa: ... RITMO+CAIDA} & Otra causa ocurrió durante el conteo\\
+\texttt{Cancelado -> Estado: ESTABLE} & El botón canceló el conteo\\
+\texttt{30 s cumplidos -> enviando alerta ...} & La alerta entró en la cola de envío\\
+\texttt{Evento ALERTA enviado, respuesta HTTP: 200} & Entregada\\
+\texttt{respuesta HTTP: -1} & No se pudo conectar con el servidor (se reintenta)\\
+\texttt{No se pudo enviar ... después de 5 intentos} & Alerta descartada\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Problemas frecuentes}
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{5.2cm} >{\raggedright\arraybackslash}p{9.7cm}@{}}
+\toprule
+\textbf{Síntoma} & \textbf{Causa probable y solución}\\
+\midrule
+\texttt{MPU6050 no encontrado} o caídas que no se detectan & Cables SDA/SCL flojos o intercambiados. Asegurar la conexión (idealmente soldar).\\
+Pulso con valores que saltan sin sentido & Sensor mal conectado o sin alimentación (su LED verde apagado). Revisar + y $-$; activar los filtros anti-ruido cuando el hardware esté firme.\\
+\texttt{respuesta HTTP: -1} constante & El servidor no está corriendo, la IP del PC cambió, o el firewall de Windows bloquea el puerto 5000.\\
+El monitor no muestra nada & El puerto USB usado no coincide con \texttt{ARDUINO\_USB\_CDC\_ON\_BOOT} en \texttt{platformio.ini} (0 = puerto UART, 1 = USB nativo).\\
+LED parpadea rápido al arrancar & No pudo conectarse al WiFi: revisar red y clave en \texttt{secrets.h}.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%=====================================================================
+\section{Glosario}
+%=====================================================================
+
+\begin{description}[leftmargin=*,style=nextline]
+  \item[ADC] Conversor analógico-digital: mide un voltaje y lo entrega como número entero.
+  \item[BPM] Pulsaciones por minuto.
+  \item[Debounce] Filtrado de los rebotes mecánicos de un botón.
+  \item[Firmware] Programa grabado en la memoria del microcontrolador.
+  \item[g] Unidad de aceleración igual a la gravedad terrestre (9.8 m/s$^2$).
+  \item[GND] Tierra, referencia de 0 V común a todo el circuito.
+  \item[GPIO] Pin de propósito general del microcontrolador.
+  \item[I2C] Bus serial de dos cables (SDA datos, SCL reloj) para comunicar chips.
+  \item[IBI] Intervalo entre latidos, en milisegundos.
+  \item[Microcontrolador] Computador completo en un solo chip (procesador, memoria, periféricos).
+  \item[Pull-up] Resistencia que mantiene un pin en \texttt{HIGH} cuando nada lo conecta a GND.
+  \item[UART] Puerto serial; aquí, el canal por el que la placa envía texto al monitor.
+  \item[3V3] Alimentación de 3.3 V que la ESP32 entrega a los sensores.
+\end{description}
+
+\appendix
+%=====================================================================
+\section{Código fuente completo}
+%=====================================================================
+
+\subsection{\texttt{src/main.cpp}}
+\begin{lstlisting}[language=C++]
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Wire.h>
+
+#include "config.h"
+#include "secrets.h"
+
+// ESTABLE = vigilando, PENDIENTE = contando 30 s para cancelar.
+// Los sensores se leen SIEMPRE, en cualquier estado, también después de enviar una alerta.
+enum Estado { ESTABLE, PENDIENTE };
+Estado estado = ESTABLE;
+
+unsigned long tInicioAlerta = 0;
+unsigned long tLedApagadoHasta = 0;  // después de enviar una alerta, el LED se apaga un momento
+
+// LED: titila mientras vigila, fijo mientras cuenta los 30 s,
+// y se apaga un momento cuando se envía la alerta.
+void actualizarLed() {
+  if (estado == PENDIENTE) {
+    digitalWrite(PIN_LED, HIGH);                        // contando: fijo
+  } else if (millis() < tLedApagadoHasta) {
+    digitalWrite(PIN_LED, LOW);                         // alerta enviada: apagado un momento
+  } else {
+    digitalWrite(PIN_LED, (millis() / LED_TITILEO_MS) % 2 ? HIGH : LOW);  // vigilando: titila
+  }
+}
+// Causas de la alerta: se pueden sumar (por ejemplo RITMO + CAIDA)
+const uint8_t C_BOTON = 1, C_RITMO = 2, C_CAIDA = 4;
+uint8_t causas = 0;
+
+String textoCausas(uint8_t m) {
+  String t = "";
+  if (m & C_BOTON) t += "BOTON";
+  if (m & C_RITMO) t += (t.length() ? "+RITMO" : "RITMO");
+  if (m & C_CAIDA) t += (t.length() ? "+CAIDA" : "CAIDA");
+  return t;
+}
+
+// Alertas listas para enviar (fila). El envío se hace por detrás, sin dejar de vigilar.
+const int MAX_COLA = 5;
+uint8_t cola[MAX_COLA];
+int nCola = 0;
+int intentos = 0;                // intentos de envío de la primera alerta de la fila
+unsigned long tUltimoIntento = 0;
+
+// Debounce
+int lecturaAnterior = HIGH;
+int estadoBoton = HIGH;
+unsigned long tCambio = 0;
+
+bool botonPresionado() {
+  int lectura = digitalRead(PIN_BOTON);
+  if (lectura != lecturaAnterior) tCambio = millis();
+  lecturaAnterior = lectura;
+
+  if (millis() - tCambio > DEBOUNCE_MS && lectura != estadoBoton) {
+    estadoBoton = lectura;
+    if (estadoBoton == LOW) return true;  
+  }
+  return false;
+}
+
+// =====================================================================
+//  Sensor de pulso XD-58C (salida analógica)
+// =====================================================================
+int bpm = 0;                     // pulsaciones por minuto (0 = sin lectura)
+float lineaBase = 2048;          // valor promedio de la señal
+float amplitud = 0;              // tamaño típico de la onda de pulso
+bool sobreUmbral = false;        // la onda está en su parte alta
+unsigned long tUltimoLatido = 0;
+unsigned long tMuestraPulso = 0;
+unsigned long ibis[5];           // tiempos entre latidos (ms) de los últimos 5 latidos
+int nIbis = 0, iIbi = 0;
+bool ritmoArmado = true;         // false = ya avisó; espera a que el pulso baje
+const char* estadoPulso = "sin lectura (¿dedo bien puesto?)";
+unsigned long tRitmoAltoDesde = 0;  // desde cuándo el pulso está alto (0 = no está alto)
+
+void actualizarPulso() {
+  if (millis() - tMuestraPulso < MUESTREO_MS) return;
+  tMuestraPulso = millis();
+  unsigned long ahora = tMuestraPulso;
+
+  int v = analogRead(PIN_PULSO);
+  lineaBase += (v - lineaBase) * 0.005f;                // promedio lento
+  amplitud  += (fabsf(v - lineaBase) - amplitud) * 0.01f;
+
+  // Sensor apagado o desconectado: la señal se queda pegada abajo o arriba
+  if (lineaBase < PULSO_BASE_MIN || lineaBase > PULSO_BASE_MAX) {
+    bpm = 0; nIbis = 0; sobreUmbral = false;
+    estadoPulso = "sensor apagado o desconectado (¿prende su luz verde?)";
+    return;
+  }
+  if (amplitud < PULSO_AMPLITUD_MIN) {                  // señal plana: sin dedo
+    bpm = 0; nIbis = 0; sobreUmbral = false;
+    estadoPulso = "sin lectura (¿dedo bien puesto?)";
+    return;
+  }
+
+  // Latido = la señal sube por encima de la mitad de la onda
+  if (!sobreUmbral && v > lineaBase + amplitud * 0.5f && ahora - tUltimoLatido > 300) {
+    sobreUmbral = true;
+    unsigned long ibi = ahora - tUltimoLatido;
+    tUltimoLatido = ahora;
+    if (ibi >= IBI_MIN_MS && ibi <= IBI_MAX_MS) {       // entre 40 y 180 BPM
+      ibis[iIbi] = ibi;
+      iIbi = (iIbi + 1) % 5;
+      if (nIbis < 5) nIbis++;
+    } else {
+      nIbis = 0;                                        // latido raro: empezar a contar de nuevo
+    }
+    if (nIbis == 5) {
+      unsigned long suma = 0, minIbi = ibis[0], maxIbi = ibis[0];
+      for (int i = 0; i < 5; i++) {
+        suma += ibis[i];
+        if (ibis[i] < minIbi) minIbi = ibis[i];
+        if (ibis[i] > maxIbi) maxIbi = ibis[i];
+      }
+      // Un corazón late parejo; el ruido da tiempos muy distintos entre "latidos"
+      if (maxIbi > minIbi * PULSO_REGULARIDAD) {
+        bpm = 0;
+        estadoPulso = "señal irregular (ruido), se ignora";
+      } else {
+        bpm = 60000UL * 5 / suma;                       // promedio de 5 latidos
+      }
+    }
+  } else if (sobreUmbral && v < lineaBase) {
+    sobreUmbral = false;
+  }
+
+  if (ahora - tUltimoLatido > 2000) {                   // 2 s sin latidos
+    bpm = 0; nIbis = 0;
+    estadoPulso = "sin lectura (¿dedo bien puesto?)";
+  }
+}
+
+// true cuando el pulso lleva RITMO_CONFIRMA_MS seguidos en UMBRAL_BPM o más.
+// Después de avisar, vuelve a avisar solo cuando el pulso baje de UMBRAL_BPM - 5.
+bool ritmoAlto() {
+  if (bpm > 0 && bpm < UMBRAL_BPM - 5) ritmoArmado = true;
+  if (bpm < UMBRAL_BPM) { tRitmoAltoDesde = 0; return false; }
+  if (tRitmoAltoDesde == 0) tRitmoAltoDesde = millis();
+  return ritmoArmado && millis() - tRitmoAltoDesde >= RITMO_CONFIRMA_MS;
+}
+
+// =====================================================================
+//  Acelerómetro MPU6050 (I2C) - detección de caídas
+// =====================================================================
+const uint8_t MPU_ADDR = 0x68;
+bool mpuOk = false;
+bool enCaidaLibre = false;
+unsigned long tCaidaLibre = 0;
+unsigned long tMuestraMPU = 0;
+float gMin = 99, gMax = 0;       // aceleración mínima y máxima vista (para revisar en el monitor)
+int fallosMPU = 0;               // lecturas fallidas seguidas (cables flojos)
+
+bool iniciarMPU() {
+  Wire.begin(PIN_SDA, PIN_SCL);
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x6B); Wire.write(0x00);                   // despertar el sensor
+  if (Wire.endTransmission() != 0) return false;
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x1C); Wire.write(0x10);                   // rango ±8 g
+  Wire.endTransmission();
+  return true;
+}
+
+// Devuelve la aceleración total en g (1 g = quieto). -1 si falla la lectura.
+float leerAceleracionG() {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x3B);
+  if (Wire.endTransmission(false) != 0) return -1;
+  if (Wire.requestFrom(MPU_ADDR, (uint8_t)6) != 6) return -1;
+  uint8_t b[6];
+  for (int i = 0; i < 6; i++) b[i] = Wire.read();       // leer en orden
+  int16_t ax = (b[0] << 8) | b[1];
+  int16_t ay = (b[2] << 8) | b[3];
+  int16_t az = (b[4] << 8) | b[5];
+  if (ax == 0 && ay == 0 && az == 0) return -1;         // todo en cero = lectura basura
+  float x = ax / 4096.0f, y = ay / 4096.0f, z = az / 4096.0f;  // ±8 g -> 4096 por g
+  return sqrtf(x * x + y * y + z * z);
+}
+
+// Caída = caída libre (casi 0 g) seguida de un golpe fuerte en menos de 1 s.
+bool detectarCaida() {
+  if (!mpuOk || millis() - tMuestraMPU < MUESTREO_MS) return false;
+  tMuestraMPU = millis();
+  float g = leerAceleracionG();
+  if (g < 0) {
+    enCaidaLibre = false;                               // con una lectura mala no se confía
+    if (++fallosMPU >= 20) {
+      mpuOk = false;
+      fallosMPU = 0;
+      Serial.println("MPU6050 perdió la conexión (revisa SDA/SCL): lo vuelvo a buscar");
+    }
+    return false;
+  }
+  fallosMPU = 0;
+  if (g < gMin) gMin = g;
+  if (g > gMax) gMax = g;
+
+  if (g < CAIDA_LIBRE_G) {
+    if (!enCaidaLibre) { enCaidaLibre = true; tCaidaLibre = millis(); }
+  } else if (enCaidaLibre && g > IMPACTO_G) {
+    enCaidaLibre = false;
+    Serial.printf("Caída detectada (golpe de %.1f g)\n", g);
+    return true;
+  }
+  if (enCaidaLibre && millis() - tCaidaLibre > VENTANA_IMPACTO_MS) enCaidaLibre = false;
+  return false;
+}
+
+// Pasa a PENDIENTE: LED encendido y empieza el conteo de 30 s
+void iniciarConteo(uint8_t nuevas) {
+  estado = PENDIENTE;
+  causas = nuevas;
+  tInicioAlerta = millis();
+  digitalWrite(PIN_LED, HIGH);
+  Serial.printf("Estado: ALERTA por %s (30 s para cancelar con el botón)\n", textoCausas(causas).c_str());
+}
+
+// Durante el conteo se puede sumar otra causa (por ejemplo, una caída mientras el pulso está alto)
+void agregarCausa(uint8_t c) {
+  if (causas & c) return;
+  causas |= c;
+  Serial.printf("Se suma otra causa: ahora la alerta es por %s\n", textoCausas(causas).c_str());
+}
+
+void conectarWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("Conectando WiFi");
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
+    delay(250);
+    Serial.print(".");
+  }
+  Serial.println(WiFi.status() == WL_CONNECTED ? " OK" : " FALLÓ");
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+  }
+}
+
+bool enviarEvento(const char* evento, const char* causa = "") {
+  conectarWiFi();
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  HTTPClient http;
+  http.setConnectTimeout(2000);   // máximo 2 s esperando al PC, para no dejar de vigilar
+  http.setTimeout(2000);
+  http.begin(PC_URL);
+  http.addHeader("Content-Type", "application/json");
+  String body = String("{\"dispositivo\":\"ESP32-S3\",\"evento\":\"") + evento +
+                "\",\"ip\":\"" + WiFi.localIP().toString() +
+                "\",\"mac\":\"" + WiFi.macAddress() + "\"";
+  if (causa[0] != '\0') body += String(",\"causa\":\"") + causa + "\"";
+  body += "}";
+  int code = http.POST(body);
+  http.end();
+
+  Serial.printf("Evento %s enviado, respuesta HTTP: %d\n", evento, code);
+  return code == 200;
+}
+
+// Pone una alerta en la fila para enviarla
+void encolarAlerta(uint8_t m) {
+  if (nCola < MAX_COLA) cola[nCola++] = m;
+  else Serial.println("Fila de alertas llena: se descarta la más nueva");
+}
+
+// Envía la primera alerta de la fila. Si falla, reintenta cada REINTENTO_MS,
+// máximo MAX_INTENTOS veces, para no quedarse mandando mensajes sin parar.
+void atenderEnvios() {
+  if (nCola == 0) return;
+  if (intentos > 0 && millis() - tUltimoIntento < REINTENTO_MS) return;
+  tUltimoIntento = millis();
+  intentos++;
+  String c = textoCausas(cola[0]);
+  bool ok = enviarEvento("ALERTA", c.c_str());
+  if (ok || intentos >= MAX_INTENTOS) {
+    if (!ok) Serial.printf("No se pudo enviar la alerta %s después de %d intentos\n", c.c_str(), intentos);
+    for (int i = 1; i < nCola; i++) cola[i - 1] = cola[i];   // sacar de la fila
+    nCola--;
+    intentos = 0;
+  }
+}
+
+// Parpadea el LED mientras intenta conectar al WiFi (máx. 15 s).
+// Al terminar: conectado = LED fijo 2 s; sin WiFi = 10 parpadeos rápidos ( esto solo lo puse porque no sabia si me estaba leyendo:)).
+void conectarWiFiConLed() {
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("Conectando WiFi");
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
+    digitalWrite(PIN_LED, !digitalRead(PIN_LED));
+    delay(250);
+    Serial.print(".");
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf(" OK\nIP: %s\n", WiFi.localIP().toString().c_str());
+    digitalWrite(PIN_LED, HIGH);
+    delay(2000);
+  } else {
+    Serial.println(" FALLÓ");
+    for (int i = 0; i < 20; i++) {
+      digitalWrite(PIN_LED, !digitalRead(PIN_LED));
+      delay(80);
+    }
+  }
+  digitalWrite(PIN_LED, LOW);
+}
+
+void setup() {
+  Serial.begin(115200);
+  unsigned long t0 = millis();
+  while (!Serial && millis() - t0 < 3000) delay(10);  // espera al monitor USB
+
+  pinMode(PIN_BOTON, INPUT_PULLUP);
+  pinMode(PIN_LED, OUTPUT);
+  digitalWrite(PIN_LED, LOW);
+  analogReadResolution(12);                 // pulso: valores de 0 a 4095
+  mpuOk = iniciarMPU();
+  Serial.println(mpuOk ? "MPU6050 OK" : "MPU6050 no encontrado: revisa SDA/SCL (caídas desactivadas)");
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  conectarWiFiConLed();
+  enviarEvento("CONECTADA");  // aviso al PC de que la placa está en línea
+  Serial.println("Estado: ESTABLE");
+}
+
+void loop() {
+  bool presion = botonPresionado();
+  actualizarPulso();
+  bool caida = detectarCaida();
+
+  // Si el MPU6050 no respondió (cables flojos), lo vuelve a buscar cada 5 s
+  static unsigned long tBuscarMPU = 0;
+  if (!mpuOk && millis() - tBuscarMPU >= 5000) {
+    tBuscarMPU = millis();
+    mpuOk = iniciarMPU();
+    if (mpuOk) Serial.println("MPU6050 encontrado");
+  }
+
+  // Cada 2 s muestra el pulso y la aceleración en el monitor (para revisar los sensores)
+  static unsigned long tImpresion = 0;
+  if (millis() - tImpresion >= 2000) {
+    tImpresion = millis();
+    if (bpm > 0) Serial.printf("Pulso: %d BPM", bpm);
+    else Serial.printf("Pulso: %s", estadoPulso);
+    if (mpuOk) Serial.printf("  |  Acel: min %.2f g, max %.2f g\n", gMin, gMax);
+    else Serial.printf("  |  Acel: MPU6050 no encontrado (revisa SDA/SCL)\n");
+    gMin = 99; gMax = 0;
+  }
+
+  switch (estado) {
+    case ESTABLE: {
+      // Se revisan las tres causas a la vez: si pasan juntas, la alerta las lleva todas
+      uint8_t nuevas = 0;
+      if (presion) nuevas |= C_BOTON;
+      if (caida)   nuevas |= C_CAIDA;
+      if (ritmoAlto()) {
+        ritmoArmado = false;          // no volver a avisar hasta que el pulso baje
+        nuevas |= C_RITMO;
+      }
+      if (nuevas) iniciarConteo(nuevas);
+      break;
+    }
+
+    case PENDIENTE:
+      if (presion) {
+        estado = ESTABLE;
+        Serial.println("Cancelado -> Estado: ESTABLE");
+      } else {
+        // Si durante el conteo pasa otra cosa, se suma a la alerta
+        if (caida) agregarCausa(C_CAIDA);
+        if (ritmoAlto()) { ritmoArmado = false; agregarCausa(C_RITMO); }
+      }
+      if (estado == PENDIENTE && millis() - tInicioAlerta >= VENTANA_MS) {
+        Serial.printf("30 s cumplidos -> enviando alerta por %s (y sigo vigilando)\n", textoCausas(causas).c_str());
+        encolarAlerta(causas);
+        tLedApagadoHasta = millis() + LED_APAGADO_MS;  // el LED se apaga un momento
+        estado = ESTABLE;             // vuelve a vigilar (LED titilando): otra caída o pulso alto manda otra alerta
+      }
+      break;
+  }
+
+  actualizarLed();
+  atenderEnvios();
+}
+\end{lstlisting}
+
+\subsection{\texttt{include/config.h}}
+\begin{lstlisting}[language=C++]
+#pragma once
+
+// ---------- Pines ----------
+constexpr int PIN_BOTON = 4;   // botón entre GPIO4 y GND (pull-up interno)
+constexpr int PIN_LED   = 2;   // LED + resistencia (220-330 Ω) a GND
+
+// ---------- Tiempos ----------
+constexpr unsigned long VENTANA_MS   = 30000;  // 30 s para cancelar la alerta
+constexpr unsigned long DEBOUNCE_MS  = 50;
+constexpr unsigned long LED_TITILEO_MS = 500;   // vigilando: el LED cambia cada 0.5 s
+constexpr unsigned long LED_APAGADO_MS = 1000;  // al enviar una alerta: apagado 1 s
+constexpr unsigned long REINTENTO_MS = 3000;   // reintento si falla el envío
+constexpr int MAX_INTENTOS = 5;                 // si falla 5 veces, deja de reintentar esa alerta
+
+// ---------- Sensores ----------
+constexpr int PIN_PULSO = 5;   // XD-58C: pata S (señal) -> GPIO5 (entrada analógica)
+constexpr int PIN_SDA   = 8;   // MPU6050: SDA -> GPIO8
+constexpr int PIN_SCL   = 9;   // MPU6050: SCL -> GPIO9
+
+constexpr unsigned long MUESTREO_MS = 10;  // leer los sensores cada 10 ms
+
+// Ritmo cardíaco
+constexpr int UMBRAL_BPM         = 110;    // desde aquí empieza el conteo de 30 s
+constexpr int PULSO_AMPLITUD_MIN = 25;     // por debajo = no hay dedo / señal plana
+
+// Filtros anti-ruido: APAGADOS (lee como al inicio, aunque sea con ruido).
+// Para prenderlos: BASE 300/3800, REGULARIDAD 1.3, IBI 333/1500, CONFIRMA 5000.
+constexpr int PULSO_BASE_MIN      = 0;      // 0 = no revisa si el sensor está apagado
+constexpr int PULSO_BASE_MAX      = 4096;   // 4096 = no revisa si el sensor está apagado
+constexpr float PULSO_REGULARIDAD = 100.0f; // 100 = acepta latidos disparejos
+constexpr unsigned long IBI_MIN_MS = 300;   // 200 BPM
+constexpr unsigned long IBI_MAX_MS = 2000;  // 30 BPM
+constexpr unsigned long RITMO_CONFIRMA_MS = 0;  // 0 = dispara apenas llega a UMBRAL_BPM
+
+// Caídas
+constexpr float CAIDA_LIBRE_G             = 0.6f;  // casi sin peso = está cayendo
+constexpr float IMPACTO_G                 = 2.0f;  // golpe fuerte = llegó al suelo
+constexpr unsigned long VENTANA_IMPACTO_MS = 1000; // el golpe debe llegar en menos de 1 s
+\end{lstlisting}
+
+\subsection{\texttt{pc/servidor\_pc.py}}
+\begin{lstlisting}[language=Python]
+
+
+import json
+import socket
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PUERTO = 5000
+
+
+class Handler(BaseHTTPRequestHandler):
+    timeout = 5  # si una conexión se queda colgada, se suelta a los 5 s
+
+    def do_POST(self):
+        if self.path != "/alerta":
+            self.send_response(404)
+            self.end_headers()
+            return
+        largo = int(self.headers.get("Content-Length", 0))
+        datos = self.rfile.read(largo).decode(errors="ignore")
+        try:
+            datos = json.loads(datos)
+        except json.JSONDecodeError:
+            pass
+        hora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        evento = datos.get("evento") if isinstance(datos, dict) else None
+        if evento == "CONECTADA":
+            print(f"[{hora}] ESP32 conectada al WiFi desde {self.client_address[0]}")
+        else:
+            print("\a")  # pitido de consola
+            print("=" * 50)
+            print(f"  ¡ALERTA RECIBIDA!  {hora}")
+            print(f"  Desde: {self.client_address[0]}  Datos: {datos}")
+            print("=" * 50)
+        self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, *args):
+        pass  # silencia el log por defecto
+
+
+if __name__ == "__main__":
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except OSError:
+        ip = "desconocida"
+    finally:
+        s.close()
+    print(f"Escuchando en http://{ip}:{PUERTO}/alerta")
+    print("Pon esa IP en PC_URL del sketch del ESP32.")
+    ThreadingHTTPServer(("0.0.0.0", PUERTO), Handler).serve_forever()  # atiende varios mensajes a la vez
+\end{lstlisting}
+
+\subsection{\texttt{platformio.ini}}
+\begin{lstlisting}[language=ini]
+[env:esp32-s3-devkitc-1]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+monitor_speed = 115200
+; Serial sale por el puerto UART (COM). Para usar el puerto USB nativo del S3, cambiar a 1
+build_flags =
+    -D ARDUINO_USB_CDC_ON_BOOT=0
+    -D CORE_DEBUG_LEVEL=0   ; no llenar el monitor con errores internos (por ejemplo del I2C)
+; Evita que el monitor reinicie o bloquee la placa por el USB nativo
+monitor_rts = 0
+monitor_dtr = 0
+\end{lstlisting}
+
+
+
+\end{document}
