@@ -7,24 +7,31 @@
 #include "config.h"
 #include "secrets.h"
 
-enum Estado { ESTABLE, PENDIENTE, ENVIADA };
+// ESTABLE = vigilando, PENDIENTE = contando 30 s para cancelar.
+// Los sensores se leen SIEMPRE, en cualquier estado, también después de enviar una alerta.
+enum Estado { ESTABLE, PENDIENTE };
 Estado estado = ESTABLE;
 
 unsigned long tInicioAlerta = 0;
-unsigned long tUltimoIntento = 0;
-bool notificado = false;
-bool primerIntento = true;
+bool yaHuboAlerta = false;       // después de la primera alerta enviada, el LED queda encendido
 // Causas de la alerta: se pueden sumar (por ejemplo RITMO + CAIDA)
 const uint8_t C_BOTON = 1, C_RITMO = 2, C_CAIDA = 4;
 uint8_t causas = 0;
 
-String textoCausas() {
+String textoCausas(uint8_t m) {
   String t = "";
-  if (causas & C_BOTON) t += "BOTON";
-  if (causas & C_RITMO) t += (t.length() ? "+RITMO" : "RITMO");
-  if (causas & C_CAIDA) t += (t.length() ? "+CAIDA" : "CAIDA");
+  if (m & C_BOTON) t += "BOTON";
+  if (m & C_RITMO) t += (t.length() ? "+RITMO" : "RITMO");
+  if (m & C_CAIDA) t += (t.length() ? "+CAIDA" : "CAIDA");
   return t;
 }
+
+// Alertas listas para enviar (fila). El envío se hace por detrás, sin dejar de vigilar.
+const int MAX_COLA = 5;
+uint8_t cola[MAX_COLA];
+int nCola = 0;
+int intentos = 0;                // intentos de envío de la primera alerta de la fila
+unsigned long tUltimoIntento = 0;
 
 // Debounce
 int lecturaAnterior = HIGH;
@@ -133,6 +140,8 @@ bool mpuOk = false;
 bool enCaidaLibre = false;
 unsigned long tCaidaLibre = 0;
 unsigned long tMuestraMPU = 0;
+float gMin = 99, gMax = 0;       // aceleración mínima y máxima vista (para revisar en el monitor)
+int fallosMPU = 0;               // lecturas fallidas seguidas (cables flojos)
 
 bool iniciarMPU() {
   Wire.begin(PIN_SDA, PIN_SCL);
@@ -156,6 +165,7 @@ float leerAceleracionG() {
   int16_t ax = (b[0] << 8) | b[1];
   int16_t ay = (b[2] << 8) | b[3];
   int16_t az = (b[4] << 8) | b[5];
+  if (ax == 0 && ay == 0 && az == 0) return -1;         // todo en cero = lectura basura
   float x = ax / 4096.0f, y = ay / 4096.0f, z = az / 4096.0f;  // ±8 g -> 4096 por g
   return sqrtf(x * x + y * y + z * z);
 }
@@ -165,7 +175,18 @@ bool detectarCaida() {
   if (!mpuOk || millis() - tMuestraMPU < MUESTREO_MS) return false;
   tMuestraMPU = millis();
   float g = leerAceleracionG();
-  if (g < 0) return false;
+  if (g < 0) {
+    enCaidaLibre = false;                               // con una lectura mala no se confía
+    if (++fallosMPU >= 20) {
+      mpuOk = false;
+      fallosMPU = 0;
+      Serial.println("MPU6050 perdió la conexión (revisa SDA/SCL): lo vuelvo a buscar");
+    }
+    return false;
+  }
+  fallosMPU = 0;
+  if (g < gMin) gMin = g;
+  if (g > gMax) gMax = g;
 
   if (g < CAIDA_LIBRE_G) {
     if (!enCaidaLibre) { enCaidaLibre = true; tCaidaLibre = millis(); }
@@ -184,14 +205,14 @@ void iniciarConteo(uint8_t nuevas) {
   causas = nuevas;
   tInicioAlerta = millis();
   digitalWrite(PIN_LED, HIGH);
-  Serial.printf("Estado: ALERTA por %s (30 s para cancelar con el botón)\n", textoCausas().c_str());
+  Serial.printf("Estado: ALERTA por %s (30 s para cancelar con el botón)\n", textoCausas(causas).c_str());
 }
 
 // Durante el conteo se puede sumar otra causa (por ejemplo, una caída mientras el pulso está alto)
 void agregarCausa(uint8_t c) {
   if (causas & c) return;
   causas |= c;
-  Serial.printf("Se suma otra causa: ahora la alerta es por %s\n", textoCausas().c_str());
+  Serial.printf("Se suma otra causa: ahora la alerta es por %s\n", textoCausas(causas).c_str());
 }
 
 void conectarWiFi() {
@@ -215,6 +236,8 @@ bool enviarEvento(const char* evento, const char* causa = "") {
   if (WiFi.status() != WL_CONNECTED) return false;
 
   HTTPClient http;
+  http.setConnectTimeout(2000);   // máximo 2 s esperando al PC, para no dejar de vigilar
+  http.setTimeout(2000);
   http.begin(PC_URL);
   http.addHeader("Content-Type", "application/json");
   String body = String("{\"dispositivo\":\"ESP32-S3\",\"evento\":\"") + evento +
@@ -229,9 +252,27 @@ bool enviarEvento(const char* evento, const char* causa = "") {
   return code == 200;
 }
 
-bool enviarNotificacion() {
-  String c = textoCausas();
-  return enviarEvento("ALERTA", c.c_str());
+// Pone una alerta en la fila para enviarla
+void encolarAlerta(uint8_t m) {
+  if (nCola < MAX_COLA) cola[nCola++] = m;
+  else Serial.println("Fila de alertas llena: se descarta la más nueva");
+}
+
+// Envía la primera alerta de la fila. Si falla, reintenta cada REINTENTO_MS,
+// máximo MAX_INTENTOS veces, para no quedarse mandando mensajes sin parar.
+void atenderEnvios() {
+  if (nCola == 0) return;
+  if (intentos > 0 && millis() - tUltimoIntento < REINTENTO_MS) return;
+  tUltimoIntento = millis();
+  intentos++;
+  String c = textoCausas(cola[0]);
+  bool ok = enviarEvento("ALERTA", c.c_str());
+  if (ok || intentos >= MAX_INTENTOS) {
+    if (!ok) Serial.printf("No se pudo enviar la alerta %s después de %d intentos\n", c.c_str(), intentos);
+    for (int i = 1; i < nCola; i++) cola[i - 1] = cola[i];   // sacar de la fila
+    nCola--;
+    intentos = 0;
+  }
 }
 
 // Parpadea el LED mientras intenta conectar al WiFi (máx. 15 s).
@@ -282,12 +323,23 @@ void loop() {
   actualizarPulso();
   bool caida = detectarCaida();
 
-  // Muestra el pulso cada 2 s en el monitor (para revisar el sensor)
+  // Si el MPU6050 no respondió (cables flojos), lo vuelve a buscar cada 5 s
+  static unsigned long tBuscarMPU = 0;
+  if (!mpuOk && millis() - tBuscarMPU >= 5000) {
+    tBuscarMPU = millis();
+    mpuOk = iniciarMPU();
+    if (mpuOk) Serial.println("MPU6050 encontrado");
+  }
+
+  // Cada 2 s muestra el pulso y la aceleración en el monitor (para revisar los sensores)
   static unsigned long tImpresion = 0;
   if (millis() - tImpresion >= 2000) {
     tImpresion = millis();
-    if (bpm > 0) Serial.printf("Pulso: %d BPM\n", bpm);
-    else Serial.printf("Pulso: %s\n", estadoPulso);
+    if (bpm > 0) Serial.printf("Pulso: %d BPM", bpm);
+    else Serial.printf("Pulso: %s", estadoPulso);
+    if (mpuOk) Serial.printf("  |  Acel: min %.2f g, max %.2f g\n", gMin, gMax);
+    else Serial.printf("  |  Acel: MPU6050 no encontrado (revisa SDA/SCL)\n");
+    gMin = 99; gMax = 0;
   }
 
   switch (estado) {
@@ -305,9 +357,9 @@ void loop() {
     }
 
     case PENDIENTE:
-      if (presion) {  
+      if (presion) {
         estado = ESTABLE;
-        digitalWrite(PIN_LED, LOW);
+        digitalWrite(PIN_LED, yaHuboAlerta ? HIGH : LOW);
         Serial.println("Cancelado -> Estado: ESTABLE");
       } else {
         // Si durante el conteo pasa otra cosa, se suma a la alerta
@@ -315,20 +367,14 @@ void loop() {
         if (ritmoAlto()) { ritmoArmado = false; agregarCausa(C_RITMO); }
       }
       if (estado == PENDIENTE && millis() - tInicioAlerta >= VENTANA_MS) {
-        estado = ENVIADA;
-        notificado = false;
-        primerIntento = true;
-        Serial.println("30 s cumplidos -> enviando alerta");
-      }
-      break;
-
-    case ENVIADA:
-      // LED queda encendido; se reintenta hasta que el PC confirme
-      if (!notificado && (primerIntento || millis() - tUltimoIntento >= REINTENTO_MS)) {
-        primerIntento = false;
-        tUltimoIntento = millis();
-        notificado = enviarNotificacion();
+        Serial.printf("30 s cumplidos -> enviando alerta por %s (y sigo vigilando)\n", textoCausas(causas).c_str());
+        encolarAlerta(causas);
+        yaHuboAlerta = true;
+        digitalWrite(PIN_LED, HIGH);  // el LED queda encendido
+        estado = ESTABLE;             // vuelve a vigilar: otra caída o pulso alto manda otra alerta
       }
       break;
   }
+
+  atenderEnvios();
 }

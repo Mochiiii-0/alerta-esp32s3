@@ -8,6 +8,7 @@ constexpr int PIN_LED   = 2;   // LED + resistencia (220-330 Ω) a GND
 constexpr unsigned long VENTANA_MS   = 30000;  // 30 s para cancelar la alerta
 constexpr unsigned long DEBOUNCE_MS  = 50;
 constexpr unsigned long REINTENTO_MS = 3000;   // reintento si falla el envío
+constexpr int MAX_INTENTOS = 5;                 // si falla 5 veces, deja de reintentar esa alerta
 
 // ---------- Sensores ----------
 constexpr int PIN_PULSO = 5;   // XD-58C: pata S (señal) -> GPIO5 (entrada analógica)
@@ -30,6 +31,6 @@ constexpr unsigned long IBI_MAX_MS = 2000;  // 30 BPM
 constexpr unsigned long RITMO_CONFIRMA_MS = 0;  // 0 = dispara apenas llega a UMBRAL_BPM
 
 // Caídas
-constexpr float CAIDA_LIBRE_G             = 0.5f;  // casi sin peso = está cayendo
-constexpr float IMPACTO_G                 = 2.5f;  // golpe fuerte = llegó al suelo
+constexpr float CAIDA_LIBRE_G             = 0.6f;  // casi sin peso = está cayendo
+constexpr float IMPACTO_G                 = 2.0f;  // golpe fuerte = llegó al suelo
 constexpr unsigned long VENTANA_IMPACTO_MS = 1000; // el golpe debe llegar en menos de 1 s

@@ -3,12 +3,14 @@
 import json
 import socket
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PUERTO = 5000
 
 
 class Handler(BaseHTTPRequestHandler):
+    timeout = 5  # si una conexión se queda colgada, se suelta a los 5 s
+
     def do_POST(self):
         if self.path != "/alerta":
             self.send_response(404)
@@ -31,6 +33,8 @@ class Handler(BaseHTTPRequestHandler):
             print(f"  Desde: {self.client_address[0]}  Datos: {datos}")
             print("=" * 50)
         self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(b"OK")
 
@@ -49,4 +53,4 @@ if __name__ == "__main__":
         s.close()
     print(f"Escuchando en http://{ip}:{PUERTO}/alerta")
     print("Pon esa IP en PC_URL del sketch del ESP32.")
-    HTTPServer(("0.0.0.0", PUERTO), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", PUERTO), Handler).serve_forever()  # atiende varios mensajes a la vez
